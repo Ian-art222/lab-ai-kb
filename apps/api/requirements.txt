@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg[binary]
+alembic
+pydantic-settings
+python-jose[cryptography]
+passlib
+python-multipart
+PyPDF2
+python-docx

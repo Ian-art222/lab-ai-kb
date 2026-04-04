@@ -1,0 +1,99 @@
+:root {
+  --app-bg: linear-gradient(180deg, #fffaf6 0%, #fff4eb 100%);
+  --surface-bg: #fffdfb;
+  --card-bg: rgba(255, 255, 255, 0.88);
+  --border-color: #f1d8c8;
+  --text-primary: #5e3420;
+  --text-secondary: #9b6f58;
+  --warm-primary: #ef8f55;
+  --warm-primary-soft: #fff0e6;
+  --warm-gradient: linear-gradient(135deg, #ffb36a 0%, #ff8a65 50%, #f77f73 100%);
+  --success-color: #67c23a;
+  --warning-color: #e6a23c;
+  --danger-color: #f56c6c;
+  --card-radius: 18px;
+  --soft-shadow: 0 10px 30px rgba(226, 146, 97, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+  background: #fff8f3;
+  color: var(--text-primary);
+}
+
+a {
+  color: inherit;
+}
+
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.page-fade-enter-from,
+.page-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.el-card {
+  border-radius: var(--card-radius) !important;
+  border: 1px solid var(--border-color) !important;
+  background: var(--card-bg) !important;
+  box-shadow: var(--soft-shadow) !important;
+}
+
+.el-button {
+  border-radius: 12px !important;
+  transition: all 0.2s ease !important;
+}
+
+.el-button--primary {
+  background: var(--warm-gradient) !important;
+  border: none !important;
+}
+
+.el-button:hover,
+.el-card:hover {
+  transform: translateY(-1px);
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: 12px !important;
+  box-shadow: 0 0 0 1px rgba(241, 216, 200, 0.9) inset !important;
+}
+
+.el-dialog,
+.el-drawer {
+  border-radius: var(--card-radius) !important;
+}
+
+.el-tag {
+  border-radius: 999px !important;
+}
+
+.el-table {
+  --el-table-header-bg-color: #fff7f1;
+  --el-table-row-hover-bg-color: #fff9f4;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.el-menu {
+  border-right: none !important;
+}
