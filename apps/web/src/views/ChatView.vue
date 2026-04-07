@@ -291,10 +291,13 @@
               <div class="message-content">{{ m.content }}</div>
               <div v-if="m.role === 'assistant' && m.state === 'normal' && (m.taskType || m.selectedSkill || m.workflowSummary)" class="workflow-pill-wrap">
                 <el-tag size="small" type="info" effect="plain">task: {{ m.taskType || '—' }}</el-tag>
+                <el-tag size="small" type="info" effect="plain">scope: {{ m.selectedScope || '—' }}</el-tag>
                 <el-tag size="small" type="success" effect="plain">skill: {{ m.selectedSkill || '—' }}</el-tag>
                 <el-tag v-if="m.isCompareMode" size="small" type="warning" effect="plain">比较模式</el-tag>
                 <el-tag v-if="m.clarificationNeeded" size="small" type="danger" effect="plain">需要澄清</el-tag>
                 <el-tag v-if="m.fallbackTriggered" size="small" type="warning" effect="plain">追加检索已触发</el-tag>
+                <el-tag v-if="m.sourceSkewed" size="small" type="danger" effect="plain">单源倾斜</el-tag>
+                <el-tag v-if="m.evidenceAsymmetric" size="small" type="danger" effect="plain">证据不对称</el-tag>
                 <span class="workflow-summary-text">{{ m.workflowSummary || '—' }}</span>
               </div>
 
@@ -434,11 +437,14 @@ type ChatMessage = {
   retrievalMeta?: Partial<RetrievalMeta>
   answerSource?: AnswerSource
   taskType?: string | null
+  selectedScope?: string | null
   selectedSkill?: string | null
   workflowSummary?: string | null
   clarificationNeeded?: boolean
   fallbackTriggered?: boolean
   isCompareMode?: boolean
+  sourceSkewed?: boolean
+  evidenceAsymmetric?: boolean
 }
 
 type RetrievalMetaRow = { label: string; value: string }
@@ -861,11 +867,14 @@ const handleAsk = async () => {
             retrievalMeta: res.retrieval_meta,
             answerSource: res.answer_source,
             taskType: res.task_type ?? res.retrieval_meta?.task_type ?? null,
+            selectedScope: res.retrieval_meta?.selected_scope ?? null,
             selectedSkill: res.selected_skill ?? res.retrieval_meta?.selected_skill ?? null,
             workflowSummary: res.workflow_summary ?? res.retrieval_meta?.workflow_summary ?? null,
             clarificationNeeded: Boolean(res.clarification_needed ?? res.retrieval_meta?.clarification_needed),
             fallbackTriggered: Boolean(res.retrieval_meta?.fallback_triggered),
             isCompareMode: (res.task_type ?? res.retrieval_meta?.task_type) === 'compare',
+            sourceSkewed: Number(res.retrieval_meta?.dominant_source_ratio ?? 0) >= 0.75,
+            evidenceAsymmetric: Boolean((res.compare_result as Record<string, unknown> | null)?.evidence_asymmetry),
           }
         : item,
     )
