@@ -20,11 +20,11 @@ from app.services.settings_service import (
     get_effective_embedding_batch_size,
 )
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 150
-MIN_CHUNK_CHARS = 80
+CHUNK_SIZE = app_settings.ingest_chunk_size
+CHUNK_OVERLAP = app_settings.ingest_chunk_overlap
+MIN_CHUNK_CHARS = app_settings.ingest_min_chunk_chars
 MIN_MEANINGFUL_TEXT_CHARS = 5
-MAX_INDEX_TEXT_CHARS = 200000
+MAX_INDEX_TEXT_CHARS = app_settings.ingest_max_index_text_chars
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def _split_markdown_sections(text: str) -> list[dict]:
     lines = text.splitlines()
     sections: list[dict] = []
     current_title: str | None = None
+    current_heading_level: int | None = None
     buf: list[str] = []
     in_code = False
 
@@ -76,6 +77,7 @@ def _split_markdown_sections(text: str) -> list[dict]:
                 "text": body,
                 "page_number": None,
                 "section_title": current_title,
+                "heading_level": current_heading_level,
                 "block_type": block_type,
             }
         )
@@ -90,6 +92,10 @@ def _split_markdown_sections(text: str) -> list[dict]:
             flush()
             buf = []
             current_title = stripped.lstrip("#").strip() or current_title
+            current_heading_level = len(stripped) - len(stripped.lstrip("#"))
+            continue
+        if not in_code and re.match(r"^\|.+\|$", stripped):
+            buf.append(line)
             continue
         buf.append(line)
     flush()
@@ -114,10 +120,21 @@ def _split_paragraph_segments(
                 "text": content,
                 "page_number": page_number,
                 "section_title": section_title or _guess_section_title(content),
-                "block_type": block_type,
+                "block_type": "table" if _looks_like_text_table(content) else block_type,
             }
         )
     return segments
+
+
+def _looks_like_text_table(content: str) -> bool:
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    pipe_lines = [ln for ln in lines if "|" in ln]
+    if len(pipe_lines) >= 2:
+        return True
+    sep_like = [ln for ln in lines if re.match(r"^[\s\-+:|]{3,}$", ln)]
+    return bool(sep_like and pipe_lines)
 
 
 def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
@@ -133,15 +150,23 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
         segments: list[dict] = []
+        weak_pages = 0
         for index, page in enumerate(reader.pages):
             page_text = _normalize_pdf_text(page.extract_text() or "")
             if page_text:
+                if len(page_text.strip()) < app_settings.ingest_pdf_min_chars_per_page:
+                    weak_pages += 1
                 segments.extend(
                     _split_paragraph_segments(
                         page_text,
                         page_number=index + 1,
                     )
                 )
+        if weak_pages and weak_pages >= max(1, len(reader.pages) // 2):
+            logger.warning(
+                "PDF text extraction looks weak for file_id=%s; likely scanned PDF without OCR support",
+                file_record.id,
+            )
         return segments
     if file_type == "docx":
         document = Document(str(file_path))
@@ -193,11 +218,22 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
                 {
                     "text": content[:remaining],
                     "page_number": segment.get("page_number"),
+                    "section_title": segment.get("section_title"),
+                    "block_type": segment.get("block_type"),
+                    "heading_level": segment.get("heading_level"),
                 }
             )
             truncated = True
             break
-        limited.append({"text": content, "page_number": segment.get("page_number")})
+        limited.append(
+            {
+                "text": content,
+                "page_number": segment.get("page_number"),
+                "section_title": segment.get("section_title"),
+                "block_type": segment.get("block_type"),
+                "heading_level": segment.get("heading_level"),
+            }
+        )
         total += len(content)
     return limited, truncated
 
@@ -361,7 +397,7 @@ def ingest_file_job(
         limited_segments, truncated = _limit_segments(segments)
         warnings: list[str] = []
         if truncated:
-            warnings.append("文件文本较长，本次仅截取前 200000 个字符建立索引")
+            warnings.append(f"文件文本较长，本次仅截取前 {MAX_INDEX_TEXT_CHARS} 个字符建立索引")
 
         # Unified in-memory spec for DB rows (parent = segment-level, child = _chunk_text slices).
         # parent_ref: index into this list for the parent row; None for parent rows.

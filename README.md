@@ -70,11 +70,15 @@ EMBED_BATCH_DELAY=0.25
 - `QA_QUERY_EXPANSION_ENABLED`：是否启用轻量 query expansion（默认关闭）
 - `QA_QUERY_EXPANSION_MAX_QUERIES`：扩展 query 数上限
 - `QA_STRICT_MIN_CITATIONS`：严格模式最低引用条数
+- `QA_MIN_GROUNDED_CITATIONS`：非严格模式下进入知识库回答的最低引用条数（不足则回退通用回答）
+- `INGEST_CHUNK_SIZE` / `INGEST_CHUNK_OVERLAP` / `INGEST_MIN_CHUNK_CHARS` / `INGEST_MAX_INDEX_TEXT_CHARS`：文本型分块与截断策略
+- `INGEST_PDF_MIN_CHARS_PER_PAGE`：文本型 PDF 最小页面字符阈值（用于识别疑似扫描件并记录降级日志）
 
 说明：
 
 - 当 pgvector 检索不可用（数据库、扩展或查询异常）时，会自动回退到应用层 cosine 检索，保证主链路可用性。
 - 系统日志会记录当前检索策略、召回数量、阈值和 rerank 是否执行，便于回归与排障。
+- 当前仅支持文本型解析：`txt/md/pdf/docx`；不支持 OCR、图片理解和多模态解析。
 
 ## 前端环境变量
 

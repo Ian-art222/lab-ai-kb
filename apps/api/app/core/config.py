@@ -63,10 +63,18 @@ class Settings(BaseSettings):
 
     # Grounding guardrail
     qa_strict_min_citations: int = 1
+    qa_min_grounded_citations: int = 1
 
     # pgvector semantic search (dimension must match migration + DB column; mismatch → in-memory fallback)
     qa_pgvector_semantic_enabled: bool = True
     qa_pgvector_dimensions: int = 1536
+
+    # Chunking / parsing (text-only)
+    ingest_chunk_size: int = 1000
+    ingest_chunk_overlap: int = 150
+    ingest_min_chunk_chars: int = 80
+    ingest_max_index_text_chars: int = 200000
+    ingest_pdf_min_chars_per_page: int = 20
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

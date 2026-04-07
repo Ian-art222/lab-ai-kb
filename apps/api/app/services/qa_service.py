@@ -121,7 +121,7 @@ def _build_retrieval_meta(
         "scope_type": scope_type,
         "strict_mode": strict_mode,
         "top_k": top_k,
-        "min_similarity_score": MIN_SIMILARITY_SCORE,
+        "min_similarity_score": score_threshold_applied,
         "candidate_chunks": candidate_chunks,
         "matched_chunks": matched_chunks,
         # Final chunks actually concatenated into the LLM context (same as packed_chunks when packing runs).
@@ -129,7 +129,7 @@ def _build_retrieval_meta(
         "compatible_file_count": compatible_file_count,
         "used_file_ids": used_file_ids,
         # Legacy field name (same value as min_similarity_score)
-        "min_score": MIN_SIMILARITY_SCORE,
+        "min_score": score_threshold_applied,
         "candidate_k": candidate_k,
         "expanded_chunks": expanded_chunks,
         "packed_chunks": packed_chunks,
@@ -156,6 +156,15 @@ def _truncate_ranked_to_candidate_k(ranked: list[dict], candidate_k: int) -> lis
     if candidate_k < 1:
         return []
     return ranked[:candidate_k]
+
+
+def _is_grounded_answer(answer: str, references: list[dict]) -> bool:
+    text = (answer or "").strip()
+    if not text:
+        return False
+    if not references:
+        return False
+    return True
 
 
 def _neighbor_score_from_seed(seed_score: float, index_distance: int) -> float:
@@ -1367,6 +1376,11 @@ def ask_question(
                 "你是一个只依据用户给定的知识库片段作答的助手；无充分依据时不臆测，也不使用课外知识兜底。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            if not _is_grounded_answer(answer, references):
+                raise QAServiceError(
+                    "NO_RELIABLE_EVIDENCE",
+                    "知识库证据不足，严格模式下无法给出可引用回答。",
+                )
             retrieval_meta = _build_retrieval_meta(
                 retrieval_strategy=retrieval_strategy,
                 answer_source="knowledge_base",
@@ -1439,44 +1453,53 @@ def ask_question(
                 "你优先依据用户提供的知识库资料作答；仅在资料边界清晰的前提下可谨慎补充常识，不伪造知识库内容。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
-            retrieval_meta = _build_retrieval_meta(
-                retrieval_strategy=retrieval_strategy,
-                answer_source="knowledge_base",
-                scope_type=scope_type,
-                strict_mode=strict_mode,
-                top_k=top_k,
-                compatible_file_count=compatible_count,
-                candidate_chunks=len(matches),
-                matched_chunks=len(reliable_matches),
-                selected_chunks=packed_n,
-                used_file_ids=list(used_files),
-                candidate_k=candidate_k,
-                expanded_chunks=expanded_n,
-                packed_chunks=packed_n,
-                context_chars=context_chars,
-                neighbor_window=neighbor_window,
-                dedupe_adjacent_chunks=dedupe_adjacent,
-                retrieval_mode=retrieval_mode,
-                semantic_candidate_count=len(semantic_matches),
-                lexical_candidate_count=len(lexical_matches),
-                fusion_method=("rrf" if retrieval_mode == "hybrid" else retrieval_mode),
-                score_threshold_applied=score_threshold_applied,
-                rerank_enabled=eff_rerank_enabled,
-                rerank_input_count=rerank_input_count,
-                rerank_output_count=rerank_output_count,
-                rerank_model_name=app_settings.qa_rerank_model_name,
-                rerank_applied=rerank_applied,
-                parent_recovered_chunks=parent_recovered_chunks,
-                parent_deduped_groups=parent_deduped_groups,
-            )
-            return {
-                "answer": answer,
-                "references": references,
-                "references_json": references,
-                "answer_source": "knowledge_base",
-                "used_files": used_files,
-                "retrieval_meta": retrieval_meta,
-            }
+            min_citations = max(1, int(app_settings.qa_min_grounded_citations))
+            if len(references) < min_citations or not _is_grounded_answer(answer, references):
+                logger.info(
+                    "Grounding guard triggered; references=%s required=%s; fallback to model_general",
+                    len(references),
+                    min_citations,
+                )
+                reliable_matches = []
+            else:
+                retrieval_meta = _build_retrieval_meta(
+                    retrieval_strategy=retrieval_strategy,
+                    answer_source="knowledge_base",
+                    scope_type=scope_type,
+                    strict_mode=strict_mode,
+                    top_k=top_k,
+                    compatible_file_count=compatible_count,
+                    candidate_chunks=len(matches),
+                    matched_chunks=len(reliable_matches),
+                    selected_chunks=packed_n,
+                    used_file_ids=list(used_files),
+                    candidate_k=candidate_k,
+                    expanded_chunks=expanded_n,
+                    packed_chunks=packed_n,
+                    context_chars=context_chars,
+                    neighbor_window=neighbor_window,
+                    dedupe_adjacent_chunks=dedupe_adjacent,
+                    retrieval_mode=retrieval_mode,
+                    semantic_candidate_count=len(semantic_matches),
+                    lexical_candidate_count=len(lexical_matches),
+                    fusion_method=("rrf" if retrieval_mode == "hybrid" else retrieval_mode),
+                    score_threshold_applied=score_threshold_applied,
+                    rerank_enabled=eff_rerank_enabled,
+                    rerank_input_count=rerank_input_count,
+                    rerank_output_count=rerank_output_count,
+                    rerank_model_name=app_settings.qa_rerank_model_name,
+                    rerank_applied=rerank_applied,
+                    parent_recovered_chunks=parent_recovered_chunks,
+                    parent_deduped_groups=parent_deduped_groups,
+                )
+                return {
+                    "answer": answer,
+                    "references": references,
+                    "references_json": references,
+                    "answer_source": "knowledge_base",
+                    "used_files": used_files,
+                    "retrieval_meta": retrieval_meta,
+                }
 
         low_rel_note = ""
         if candidate_matches:
