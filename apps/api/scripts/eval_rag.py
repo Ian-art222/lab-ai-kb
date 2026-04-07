@@ -9,7 +9,6 @@ Run from apps/api with DB + .env configured:
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -156,16 +155,10 @@ def _aggregate_round(
     recall_sum = 0.0
     recall_n = 0
     kw_eval = kw_hits = 0
-    rr_sum = 0.0
-    rr_n = 0
-    ndcg_sum = 0.0
-    ndcg_n = 0
-    retrieval_strategy: Counter[str] = Counter()
     distinct_docs_topk_sum = 0.0
     distinct_docs_ctx_sum = 0.0
-    same_doc_ratio_sum = 0.0
+    same_doc_chunk_ratio_sum = 0.0
     adjacent_redundancy_sum = 0.0
-    diversity_n = 0
     multi_source_answers = 0
 
     for sample, row in zip(samples, rows):
@@ -175,38 +168,6 @@ def _aggregate_round(
         latencies.append(float(row["latency_ms"]))
         if row.get("rerank_applied"):
             rerank_yes += 1
-        meta = row.get("retrieval_meta") or {}
-        retrieval_strategy[str(meta.get("retrieval_strategy") or "unknown")] += 1
-        refs = row["refs_slim"]
-        if refs:
-            diversity_n += 1
-            topk_refs = refs[: int(meta.get("top_k") or 6)]
-            topk_docs = [r.get("file_id") for r in topk_refs if r.get("file_id") is not None]
-            ctx_docs = [r.get("file_id") for r in refs if r.get("file_id") is not None]
-            distinct_docs_topk_sum += len(set(topk_docs))
-            distinct_docs_ctx_sum += len(set(ctx_docs))
-            if ctx_docs:
-                same_doc_ratio_sum += 1.0 - (len(set(ctx_docs)) / max(1, len(ctx_docs)))
-            if len(set(ctx_docs)) >= 2:
-                multi_source_answers += 1
-            # Adjacent redundancy (same file and close chunk index)
-            adjacent_pairs = 0
-            adjacent_hits = 0
-            ordered = [
-                (r.get("file_id"), r.get("chunk_index"))
-                for r in refs
-                if r.get("file_id") is not None and r.get("chunk_index") is not None
-            ]
-            for i in range(len(ordered) - 1):
-                f1, c1 = ordered[i]
-                f2, c2 = ordered[i + 1]
-                if f1 != f2:
-                    continue
-                adjacent_pairs += 1
-                if abs(int(c2) - int(c1)) <= 1:
-                    adjacent_hits += 1
-            if adjacent_pairs > 0:
-                adjacent_redundancy_sum += adjacent_hits / adjacent_pairs
 
         exp_files = sample.get("expected_file_ids")
         if exp_files:
@@ -218,6 +179,7 @@ def _aggregate_round(
         exp_chunks = sample.get("expected_chunk_ids")
         if exp_chunks:
             chunk_eval += 1
+            meta = row.get("retrieval_meta") or {}
             k = int(meta.get("top_k") or 6)
             ordered = [r["chunk_id"] for r in row["refs_slim"] if r.get("chunk_id") is not None]
             topk_set = set(ordered[:k])
@@ -226,25 +188,6 @@ def _aggregate_round(
                 chunk_hits += 1
             recall_sum += len(topk_set & exp_set) / max(1, len(exp_set))
             recall_n += 1
-            # MRR
-            rr_n += 1
-            rr = 0.0
-            for rank, cid in enumerate(ordered[:k], start=1):
-                if cid in exp_set:
-                    rr = 1.0 / rank
-                    break
-            rr_sum += rr
-            # nDCG@k (binary gain)
-            ndcg_n += 1
-            dcg = 0.0
-            for rank, cid in enumerate(ordered[:k], start=1):
-                if cid in exp_set:
-                    dcg += 1.0 / (1.0 if rank == 1 else (math.log2(rank + 1)))
-            ideal_hits = min(len(exp_set), k)
-            idcg = 0.0
-            for rank in range(1, ideal_hits + 1):
-                idcg += 1.0 / (1.0 if rank == 1 else (math.log2(rank + 1)))
-            ndcg_sum += (dcg / idcg) if idcg > 0 else 0.0
 
         exp_kw = sample.get("expected_keywords")
         if exp_kw:
@@ -252,37 +195,64 @@ def _aggregate_round(
             if _keyword_hit(str(row.get("answer") or ""), row.get("_raw_refs") or [], exp_kw):
                 kw_hits += 1
 
+        refs = [r for r in row["refs_slim"] if isinstance(r, dict)]
+        file_ids = [r.get("file_id") for r in refs if r.get("file_id") is not None]
+        if file_ids:
+            distinct_docs = len(set(file_ids))
+            distinct_docs_topk_sum += distinct_docs
+            distinct_docs_ctx_sum += distinct_docs
+            if distinct_docs >= 2:
+                multi_source_answers += 1
+            same_doc_chunk_ratio_sum += max(Counter(file_ids).values()) / max(1, len(file_ids))
+            adjacent_pairs = 0
+            adjacent_hits = 0
+            by_file: dict[int, list[int]] = {}
+            for r in refs:
+                if r.get("file_id") is None or r.get("chunk_index") is None:
+                    continue
+                by_file.setdefault(int(r["file_id"]), []).append(int(r["chunk_index"]))
+            for idxs in by_file.values():
+                idxs.sort()
+                for i in range(1, len(idxs)):
+                    adjacent_pairs += 1
+                    if abs(idxs[i] - idxs[i - 1]) <= 1:
+                        adjacent_hits += 1
+            adjacent_redundancy_sum += (adjacent_hits / adjacent_pairs) if adjacent_pairs else 0.0
+
     def _rate(num: int, den: int) -> float | None:
         if den <= 0:
             return None
         return num / den
+
+    def _pct(values: list[float], p: float) -> float | None:
+        if not values:
+            return None
+        vals = sorted(values)
+        idx = int(round((len(vals) - 1) * p))
+        return vals[max(0, min(idx, len(vals) - 1))]
 
     return {
         "total_questions": total,
         "answered_count": answered,
         "answer_source_distribution": dict(src),
         "avg_latency_ms": sum(latencies) / len(latencies) if latencies else None,
+        "p50_latency_ms": _pct(latencies, 0.50),
+        "p95_latency_ms": _pct(latencies, 0.95),
         "rerank_applied_rate": _rate(rerank_yes, answered) if answered else None,
         "retrieval_file_hit_rate": _rate(file_hits, file_eval),
         "retrieval_chunk_hit_rate": _rate(chunk_hits, chunk_eval),
         "recall_at_top_k_mean": (recall_sum / recall_n) if recall_n else None,
-        "mrr_at_top_k": (rr_sum / rr_n) if rr_n else None,
-        "ndcg_at_top_k": (ndcg_sum / ndcg_n) if ndcg_n else None,
         "keyword_hit_rate": _rate(kw_hits, kw_eval),
-        "latency_p50_ms": _percentile(latencies, 0.5),
-        "latency_p95_ms": _percentile(latencies, 0.95),
-        "retrieval_strategy_distribution": dict(retrieval_strategy),
-        "distinct_docs_in_topk": (distinct_docs_topk_sum / diversity_n) if diversity_n else None,
-        "distinct_docs_in_context": (distinct_docs_ctx_sum / diversity_n) if diversity_n else None,
-        "same_doc_chunk_ratio": (same_doc_ratio_sum / diversity_n) if diversity_n else None,
-        "adjacent_chunk_redundancy_rate": (adjacent_redundancy_sum / diversity_n) if diversity_n else None,
-        "multi_source_answer_rate": _rate(multi_source_answers, answered),
+        "distinct_docs_in_topk": (distinct_docs_topk_sum / answered) if answered else None,
+        "distinct_docs_in_context": (distinct_docs_ctx_sum / answered) if answered else None,
+        "same_doc_chunk_ratio": (same_doc_chunk_ratio_sum / answered) if answered else None,
+        "adjacent_chunk_redundancy_rate": (adjacent_redundancy_sum / answered) if answered else None,
+        "multi_source_answer_rate": _rate(multi_source_answers, answered) if answered else None,
         "_denoms": {
             "file_evaluated": file_eval,
             "chunk_evaluated": chunk_eval,
             "recall_evaluated": recall_n,
             "keyword_evaluated": kw_eval,
-            "diversity_evaluated": diversity_n,
         },
     }
 
@@ -301,16 +271,13 @@ def _print_summary(label_a: str, m_a: dict[str, Any], label_b: str, m_b: dict[st
         ("total_questions", "total_questions"),
         ("answered_count", "answered_count"),
         ("avg_latency_ms", "avg_latency_ms"),
-        ("latency_p50_ms", "latency_p50_ms"),
-        ("latency_p95_ms", "latency_p95_ms"),
+        ("p50_latency_ms", "p50_latency_ms"),
+        ("p95_latency_ms", "p95_latency_ms"),
         ("rerank_applied_rate", "rerank_applied_rate"),
         ("retrieval_file_hit_rate", "retrieval_file_hit_rate"),
         ("retrieval_chunk_hit_rate", "retrieval_chunk_hit_rate"),
         ("recall_at_top_k_mean", "recall@top_k_mean"),
-        ("mrr_at_top_k", "mrr@top_k"),
-        ("ndcg_at_top_k", "ndcg@top_k"),
         ("keyword_hit_rate", "keyword_hit_rate"),
-        ("distinct_docs_in_topk", "distinct_docs_in_topk"),
         ("distinct_docs_in_context", "distinct_docs_in_context"),
         ("same_doc_chunk_ratio", "same_doc_chunk_ratio"),
         ("adjacent_chunk_redundancy_rate", "adjacent_chunk_redundancy_rate"),
@@ -320,24 +287,7 @@ def _print_summary(label_a: str, m_a: dict[str, Any], label_b: str, m_b: dict[st
         print(f"  {title}: {label_a}={fmt(m_a.get(key))} | {label_b}={fmt(m_b.get(key))}")
     print(f"  answer_source ({label_a}): {m_a.get('answer_source_distribution')}")
     print(f"  answer_source ({label_b}): {m_b.get('answer_source_distribution')}")
-    print(f"  retrieval_strategy ({label_a}): {m_a.get('retrieval_strategy_distribution')}")
-    print(f"  retrieval_strategy ({label_b}): {m_b.get('retrieval_strategy_distribution')}")
     print()
-
-
-def _percentile(values: list[float], q: float) -> float | None:
-    if not values:
-        return None
-    xs = sorted(values)
-    if len(xs) == 1:
-        return xs[0]
-    pos = max(0.0, min(1.0, q)) * (len(xs) - 1)
-    lo = int(pos)
-    hi = min(len(xs) - 1, lo + 1)
-    if lo == hi:
-        return xs[lo]
-    ratio = pos - lo
-    return xs[lo] * (1 - ratio) + xs[hi] * ratio
 
 
 def _row_for_json(row: dict[str, Any]) -> dict[str, Any]:

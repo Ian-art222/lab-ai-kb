@@ -28,7 +28,7 @@ class RetrievalMetaPayload(BaseModel):
     """Normalized retrieval metadata returned on successful /api/qa/ask responses."""
 
     retrieval_strategy: str = Field(
-        description="Runtime strategy label, e.g. pgvector_ann_hnsw | app_layer_cosine_topk | fts_websearch_rrf"
+        description="Fixed strategy label, e.g. app_layer_cosine_topk"
     )
     answer_source: str = Field(
         description="knowledge_base | knowledge_base_low_confidence | model_general (error only on client for failures)"
@@ -99,3 +99,4 @@ class QASessionItem(BaseModel):
     message_count: int
     updated_at: str
     created_at: str
+

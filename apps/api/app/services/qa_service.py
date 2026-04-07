@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-import time
 from datetime import datetime
 
 from sqlalchemy import func, or_
@@ -26,56 +25,121 @@ SNIPPET_TRUNCATE_LENGTH = 220
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETRIEVAL_STRATEGY = "app_layer_cosine_topk"
+# Fixed label for clients; describes in-process cosine over stored embeddings (no DB ANN).
+RETRIEVAL_STRATEGY = "app_layer_cosine_topk"
 
 # Upper bound for in-memory ranked pool (top_k vs qa_candidate_k); avoids unbounded scans.
 QA_RETRIEVAL_POOL_CAP = 128
 
 
-def _normalize_retrieval_mode(value: str | None) -> str:
-    mode = (value or "").strip().lower()
-    if mode in {"semantic", "lexical", "hybrid"}:
-        return mode
-    return "hybrid"
+def _token_jaccard_similarity(text_a: str, text_b: str) -> float:
+    a = {tok for tok in re.findall(r"\w+", (text_a or "").lower()) if len(tok) > 1}
+    b = {tok for tok in re.findall(r"\w+", (text_b or "").lower()) if len(tok) > 1}
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    if union <= 0:
+        return 0.0
+    return len(a & b) / union
 
 
-def _score_threshold_for_mode(mode: str) -> float:
-    if mode == "semantic":
-        return float(app_settings.qa_semantic_threshold)
-    if mode == "lexical":
-        return float(app_settings.qa_lexical_threshold)
-    return float(app_settings.qa_hybrid_threshold)
+def _apply_diversity_rerank(items: list[dict]) -> list[dict]:
+    if not items or not app_settings.qa_diversity_rerank_enabled:
+        return list(items)
+    lam = max(0.0, min(1.0, float(app_settings.qa_diversity_lambda)))
+    sim_threshold = max(0.0, min(1.0, float(app_settings.qa_redundancy_sim_threshold)))
+    selected: list[dict] = []
+    remaining = list(items)
+    doc_counts: dict[int, int] = {}
+
+    while remaining:
+        best_idx = 0
+        best_score = float("-inf")
+        for idx, item in enumerate(remaining):
+            ch = item["chunk"]
+            rel = float(item.get("score", 0.0))
+            doc_id = int(ch.file_id)
+            doc_penalty = min(1.0, doc_counts.get(doc_id, 0) * 0.4)
+            redundancy_penalty = 0.0
+            for sel in selected[-8:]:
+                sch = sel["chunk"]
+                if int(sch.file_id) != doc_id:
+                    continue
+                if abs(int(sch.chunk_index) - int(ch.chunk_index)) > max(1, int(app_settings.qa_merge_adjacent_gap)):
+                    continue
+                sim = _token_jaccard_similarity(sch.content or "", ch.content or "")
+                if sim >= sim_threshold:
+                    redundancy_penalty = max(redundancy_penalty, sim)
+            blended = (1.0 - lam) * rel - lam * max(doc_penalty, redundancy_penalty)
+            if blended > best_score:
+                best_score = blended
+                best_idx = idx
+        chosen = remaining.pop(best_idx)
+        selected.append(chosen)
+        cid = int(chosen["chunk"].file_id)
+        doc_counts[cid] = doc_counts.get(cid, 0) + 1
+    return selected
 
 
-def _build_query_variants(question: str) -> list[str]:
-    base = " ".join((question or "").split()).strip()
-    if not base:
+def _enforce_doc_diversity(items: list[dict]) -> list[dict]:
+    if not items:
         return []
-    if not app_settings.qa_query_expansion_enabled:
-        return [base]
+    per_doc_cap = max(1, int(app_settings.qa_max_chunks_per_doc))
+    target_docs = max(1, int(app_settings.qa_target_distinct_docs))
+    min_docs = max(1, int(app_settings.qa_min_distinct_docs_for_multi_source))
+    dominance = max(1.0, float(app_settings.qa_single_doc_dominance_ratio))
 
-    variants: list[str] = [base]
-    compact = re.sub(r"[^\w\u4e00-\u9fff]+", " ", base, flags=re.UNICODE).strip()
-    if compact and compact != base:
-        variants.append(compact)
+    by_doc: dict[int, list[dict]] = {}
+    for it in items:
+        did = int(getattr(it["chunk"], "file_id", 0))
+        by_doc.setdefault(did, []).append(it)
 
-    # Keep high-signal words as a lexical-biased variant.
-    tokens = [tok for tok in compact.split() if len(tok) >= 2]
-    if len(tokens) >= 3:
-        variants.append(" ".join(tokens[:12]))
+    unique_docs = list(by_doc.keys())
+    if len(unique_docs) < min_docs:
+        out: list[dict] = []
+        per_doc_count: dict[int, int] = {}
+        for it in items:
+            did = int(it["chunk"].file_id)
+            if per_doc_count.get(did, 0) >= per_doc_cap:
+                continue
+            out.append(it)
+            per_doc_count[did] = per_doc_count.get(did, 0) + 1
+        logger.info("Doc diversity skipped: unique_docs=%s per_doc_cap=%s", len(unique_docs), per_doc_cap)
+        return out
 
-    max_q = max(1, int(app_settings.qa_query_expansion_max_queries))
-    out: list[str] = []
-    seen: set[str] = set()
-    for q in variants:
-        nq = q.strip()
-        if not nq or nq in seen:
+    best_by_doc = sorted(
+        ((did, max(float(x.get("score", 0.0)) for x in rows)) for did, rows in by_doc.items()),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    force_multi = True
+    if len(best_by_doc) >= 2 and best_by_doc[1][1] > 0:
+        force_multi = not (best_by_doc[0][1] >= best_by_doc[1][1] * dominance)
+
+    out: list[dict] = []
+    per_doc_count: dict[int, int] = {}
+    seeded_docs: set[int] = set()
+    if force_multi:
+        for did, _ in best_by_doc[:target_docs]:
+            out.append(by_doc[did][0])
+            per_doc_count[did] = 1
+            seeded_docs.add(did)
+
+    for it in items:
+        did = int(it["chunk"].file_id)
+        if per_doc_count.get(did, 0) >= per_doc_cap:
             continue
-        seen.add(nq)
-        out.append(nq)
-        if len(out) >= max_q:
-            break
-    return out or [base]
+        if force_multi and did not in seeded_docs and len(seeded_docs) < target_docs:
+            seeded_docs.add(did)
+        out.append(it)
+        per_doc_count[did] = per_doc_count.get(did, 0) + 1
+    logger.info(
+        "Doc diversity applied: force_multi=%s distinct_docs=%s per_doc_counts=%s",
+        force_multi,
+        len({int(x['chunk'].file_id) for x in out}),
+        per_doc_count,
+    )
+    return out
 
 
 def _child_or_legacy_retrieval_filter():
@@ -85,7 +149,6 @@ def _child_or_legacy_retrieval_filter():
 
 def _build_retrieval_meta(
     *,
-    retrieval_strategy: str,
     answer_source: str,
     scope_type: str,
     strict_mode: bool,
@@ -116,7 +179,7 @@ def _build_retrieval_meta(
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
-        "retrieval_strategy": retrieval_strategy or DEFAULT_RETRIEVAL_STRATEGY,
+        "retrieval_strategy": RETRIEVAL_STRATEGY,
         "answer_source": answer_source,
         "scope_type": scope_type,
         "strict_mode": strict_mode,
@@ -605,122 +668,6 @@ def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _token_jaccard_similarity(text_a: str, text_b: str) -> float:
-    a = {tok for tok in re.findall(r"\w+", (text_a or "").lower()) if len(tok) > 1}
-    b = {tok for tok in re.findall(r"\w+", (text_b or "").lower()) if len(tok) > 1}
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    if union == 0:
-        return 0.0
-    return inter / union
-
-
-def _apply_diversity_rerank(items: list[dict]) -> list[dict]:
-    if not items or not app_settings.qa_diversity_rerank_enabled:
-        return list(items)
-    lam = max(0.0, min(1.0, float(app_settings.qa_diversity_lambda)))
-    sim_th = max(0.0, min(1.0, float(app_settings.qa_redundancy_sim_threshold)))
-    remaining = list(items)
-    selected: list[dict] = []
-    doc_counts: dict[int, int] = {}
-    while remaining:
-        best_idx = 0
-        best_score = float("-inf")
-        for idx, item in enumerate(remaining):
-            ch = item["chunk"]
-            doc_id = int(ch.file_id)
-            rel = float(item.get("score", 0.0))
-            doc_penalty = min(1.0, doc_counts.get(doc_id, 0) * 0.4)
-            redundancy_penalty = 0.0
-            for sel in selected[-8:]:
-                sch = sel["chunk"]
-                if sch.file_id != ch.file_id:
-                    continue
-                if abs(sch.chunk_index - ch.chunk_index) <= int(app_settings.qa_merge_adjacent_gap):
-                    sim = _token_jaccard_similarity(sch.content or "", ch.content or "")
-                    if sim >= sim_th:
-                        redundancy_penalty = max(redundancy_penalty, sim)
-            score = (1.0 - lam) * rel - lam * max(doc_penalty, redundancy_penalty)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-        chosen = remaining.pop(best_idx)
-        selected.append(chosen)
-        cdoc = int(chosen["chunk"].file_id)
-        doc_counts[cdoc] = doc_counts.get(cdoc, 0) + 1
-    return selected
-
-
-def _enforce_doc_diversity(items: list[dict]) -> list[dict]:
-    if not items:
-        return []
-    per_doc_cap = max(1, int(app_settings.qa_max_chunks_per_doc))
-    target_docs = max(1, int(app_settings.qa_target_distinct_docs))
-    min_docs = max(1, int(app_settings.qa_min_distinct_docs_for_multi_source))
-    dominance = max(1.0, float(app_settings.qa_single_doc_dominance_ratio))
-
-    by_doc: dict[int, list[dict]] = {}
-    for it in items:
-        by_doc.setdefault(int(it["chunk"].file_id), []).append(it)
-
-    unique_docs = list(by_doc.keys())
-    if len(unique_docs) < min_docs:
-        out: list[dict] = []
-        doc_cnt: dict[int, int] = {}
-        for it in items:
-            did = int(it["chunk"].file_id)
-            if doc_cnt.get(did, 0) >= per_doc_cap:
-                continue
-            out.append(it)
-            doc_cnt[did] = doc_cnt.get(did, 0) + 1
-        logger.info(
-            "Doc diversity skipped: unique_docs=%s min_docs=%s per_doc_cap=%s selected=%s",
-            len(unique_docs),
-            min_docs,
-            per_doc_cap,
-            doc_cnt,
-        )
-        return out
-
-    doc_best = sorted(
-        ((did, max(float(it.get("score", 0.0)) for it in rows)) for did, rows in by_doc.items()),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    force_multi = True
-    if len(doc_best) >= 2 and doc_best[1][1] > 0:
-        force_multi = not (doc_best[0][1] >= doc_best[1][1] * dominance)
-    selected_docs: set[int] = set()
-    out: list[dict] = []
-    doc_cnt: dict[int, int] = {}
-
-    if force_multi:
-        for did, _ in doc_best[:target_docs]:
-            top_item = by_doc[did][0]
-            out.append(top_item)
-            selected_docs.add(did)
-            doc_cnt[did] = 1
-
-    for it in items:
-        did = int(it["chunk"].file_id)
-        if doc_cnt.get(did, 0) >= per_doc_cap:
-            continue
-        if force_multi and len(selected_docs) < target_docs and did not in selected_docs:
-            selected_docs.add(did)
-        out.append(it)
-        doc_cnt[did] = doc_cnt.get(did, 0) + 1
-    logger.info(
-        "Doc diversity applied: force_multi=%s target_docs=%s selected_docs=%s per_doc_counts=%s",
-        force_multi,
-        target_docs,
-        len({int(it['chunk'].file_id) for it in out}),
-        doc_cnt,
-    )
-    return out
-
-
 def _get_descendant_ids(db: Session, folder_id: int) -> set[int]:
     descendant_ids: set[int] = set()
     queue: list[int] = [folder_id]
@@ -863,7 +810,7 @@ def _retrieve_chunks(
     return ranked[:top_k]
 
 
-def _semantic_retrieval_app_layer(
+def _semantic_retrieval(
     db: Session,
     *,
     query_embedding: list[float],
@@ -879,102 +826,10 @@ def _semantic_retrieval_app_layer(
     )
 
 
-def _semantic_retrieval_pgvector(
-    db: Session,
-    *,
-    query_embedding: list[float],
-    compatible_file_ids: list[int],
-    top_k: int,
-) -> list[dict]:
-    if not compatible_file_ids or not query_embedding:
-        return []
-    try:
-        distance_expr = KnowledgeChunk.embedding_vec.cosine_distance(query_embedding)
-        rows = (
-            db.query(KnowledgeChunk, FileRecord.file_name, FileRecord.folder_id, distance_expr.label("distance"))
-            .join(FileRecord, KnowledgeChunk.file_id == FileRecord.id)
-            .filter(KnowledgeChunk.file_id.in_(compatible_file_ids))
-            .filter(_child_or_legacy_retrieval_filter())
-            .filter(KnowledgeChunk.embedding_vec.is_not(None))
-            .order_by(distance_expr.asc())
-            .limit(top_k)
-            .all()
-        )
-    except Exception:
-        logger.exception("pgvector semantic retrieval failed; fallback to app-layer cosine")
-        raise
-
-    ranked: list[dict] = []
-    for chunk, file_name, folder_id, distance in rows:
-        dist = float(distance) if distance is not None else 1.0
-        score = max(0.0, 1.0 - dist)
-        ranked.append(
-            {
-                "chunk": chunk,
-                "file_name": file_name,
-                "folder_id": folder_id,
-                "score": score,
-                "source": "semantic",
-            }
-        )
-    ranked.sort(key=lambda it: it["score"], reverse=True)
-    return ranked[:top_k]
-
-
-def _semantic_retrieval(
-    db: Session,
-    *,
-    query_embeddings: list[list[float]],
-    compatible_file_ids: list[int],
-    top_k: int,
-) -> tuple[list[dict], str]:
-    if not query_embeddings:
-        return [], DEFAULT_RETRIEVAL_STRATEGY
-
-    # Primary path: pgvector ANN
-    if app_settings.qa_pgvector_retrieval_enabled and app_settings.qa_pgvector_semantic_enabled:
-        all_candidates: dict[int, dict] = {}
-        try:
-            probe_limit = max(top_k, int(app_settings.qa_pgvector_probe_limit))
-            for query_embedding in query_embeddings:
-                for item in _semantic_retrieval_pgvector(
-                    db,
-                    query_embedding=query_embedding,
-                    compatible_file_ids=compatible_file_ids,
-                    top_k=probe_limit,
-                ):
-                    cid = item["chunk"].id
-                    if cid not in all_candidates or item["score"] > all_candidates[cid]["score"]:
-                        all_candidates[cid] = item
-            merged = list(all_candidates.values())
-            merged.sort(key=lambda it: it["score"], reverse=True)
-            if merged:
-                return merged[:top_k], "pgvector_ann_hnsw"
-        except Exception:
-            logger.info("pgvector unavailable; switching to app-layer cosine fallback")
-
-    # Fallback: app-layer cosine scan
-    all_candidates: dict[int, dict] = {}
-    for query_embedding in query_embeddings:
-        for item in _semantic_retrieval_app_layer(
-            db,
-            query_embedding=query_embedding,
-            compatible_file_ids=compatible_file_ids,
-            top_k=max(top_k, int(app_settings.qa_pgvector_probe_limit)),
-        ):
-            cid = item["chunk"].id
-            item["source"] = "semantic"
-            if cid not in all_candidates or item["score"] > all_candidates[cid]["score"]:
-                all_candidates[cid] = item
-    merged = list(all_candidates.values())
-    merged.sort(key=lambda it: it["score"], reverse=True)
-    return merged[:top_k], DEFAULT_RETRIEVAL_STRATEGY
-
-
 def _lexical_retrieval(
     db: Session,
     *,
-    questions: list[str],
+    question: str,
     compatible_file_ids: list[int],
     top_k: int,
 ) -> list[dict]:
@@ -984,10 +839,10 @@ def _lexical_retrieval(
     1. KnowledgeChunk.search_vector @@ websearch_to_tsquery (uses GIN index)
     2. Fallback: inline to_tsvector(content) @@ websearch_to_tsquery
     """
-    if not compatible_file_ids or not questions:
+    if not compatible_file_ids or not question or not question.strip():
         return []
 
-    def _do_query(tsvector_expr, q: str) -> list[dict]:
+    def _do_query(tsvector_expr) -> list[dict]:
         query = (
             db.query(KnowledgeChunk, FileRecord.file_name, FileRecord.folder_id)
             .join(FileRecord, KnowledgeChunk.file_id == FileRecord.id)
@@ -995,7 +850,7 @@ def _lexical_retrieval(
             .filter(_child_or_legacy_retrieval_filter())
             .filter(
                 tsvector_expr.op("@@")(
-                    func.websearch_to_tsquery("simple", q)
+                    func.websearch_to_tsquery("simple", question)
                 )
             )
             .order_by(KnowledgeChunk.id.asc())
@@ -1012,39 +867,28 @@ def _lexical_retrieval(
                     # Lightweight lexical score; NOT comparable to semantic cosine.
                     # RRF fusion normalizes by rank, so absolute value doesn't matter.
                     "score": 1.0,
-                    "source": "lexical",
                 }
             )
         return ranked
 
-    merged: dict[int, dict] = {}
-    for q in questions:
-        if not q.strip():
-            continue
-        # 1) Prefer search_vector (indexed GIN column)
-        try:
-            result = _do_query(KnowledgeChunk.search_vector, q)
-        except Exception:
-            result = []
-        # 2) Fallback: inline to_tsvector(content)
-        if not result:
-            try:
-                result = _do_query(
-                    func.to_tsvector(
-                        "simple",
-                        func.coalesce(KnowledgeChunk.content, ""),
-                    ),
-                    q,
-                )
-            except Exception:
-                result = []
-        for item in result:
-            cid = item["chunk"].id
-            if cid not in merged:
-                merged[cid] = item
-    out = list(merged.values())
-    out.sort(key=lambda it: (it["chunk"].file_id, it["chunk"].chunk_index))
-    return out[:top_k]
+    # 1) Prefer search_vector (indexed GIN column)
+    try:
+        result = _do_query(KnowledgeChunk.search_vector)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+
+    # 2) Fallback: inline to_tsvector(content)
+    try:
+        return _do_query(
+            func.to_tsvector(
+                "simple",
+                func.coalesce(KnowledgeChunk.content, ""),
+            )
+        )
+    except Exception:
+        return []
 
 
 _RRF_K = 60
@@ -1183,8 +1027,6 @@ def _rerank_matches(
     top_n = max(1, rerank_top_n)
     rerank_candidates = matches[:top_n]
     rest = matches[top_n:]
-    started = time.perf_counter()
-    budget_ms = max(100, int(app_settings.qa_rerank_latency_budget_ms))
 
     try:
         sentence_pairs = [
@@ -1195,18 +1037,11 @@ def _rerank_matches(
     except Exception:
         logger.exception("Rerank scoring failed for model '%s'", rerank_model_name)
         return list(matches), False
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    if elapsed_ms > budget_ms:
-        logger.warning(
-            "Rerank latency budget exceeded: model=%s elapsed_ms=%.2f budget_ms=%s",
-            rerank_model_name,
-            elapsed_ms,
-            budget_ms,
-        )
 
     for item, s in zip(rerank_candidates, scores):
         item["rerank_score"] = float(s)
 
+    rerank_candidates.sort(key=lambda it: it.get("rerank_score", 0.0), reverse=True)
     rerank_candidates.sort(key=lambda it: it.get("rerank_score", 0.0), reverse=True)
 
     return rerank_candidates + rest, True
@@ -1307,21 +1142,17 @@ def ask_question(
     )
     pool_limit = min(QA_RETRIEVAL_POOL_CAP, max(MIN_TOP_K, top_k, candidate_k))
 
-    retrieval_mode = _normalize_retrieval_mode(app_settings.qa_retrieval_mode)
-    query_variants = _build_query_variants(question)
     try:
-        query_embeddings = embed_texts(
+        query_embedding = embed_texts(
             provider=settings.embedding_provider,
             api_base=settings.embedding_api_base,
             api_key=settings.embedding_api_key,
             model=settings.embedding_model,
-            inputs=query_variants,
+            inputs=[question],
             embedding_batch_size_from_db=settings.embedding_batch_size,
-        )
+        )[0]
     except RuntimeError as exc:
         raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
-    if not query_embeddings:
-        raise QAServiceError("EMBEDDING_DATA_UNAVAILABLE", "查询向量为空，无法执行检索")
 
     compatible_file_ids = _collect_retrievable_file_ids(
         db,
@@ -1329,7 +1160,7 @@ def ask_question(
         scope_type=scope_type,
         folder_id=folder_id,
         file_ids=file_ids,
-        expected_dimension=len(query_embeddings[0]),
+        expected_dimension=len(query_embedding),
     )
     if not compatible_file_ids:
         if strict_mode:
@@ -1353,7 +1184,6 @@ def ask_question(
         answer = MODEL_NON_KB_PREFIX + answer
         refs_payload = {"answer_source": "model_general", "references": []}
         retrieval_meta = _build_retrieval_meta(
-            retrieval_strategy=DEFAULT_RETRIEVAL_STRATEGY,
             answer_source="model_general",
             scope_type=scope_type,
             strict_mode=strict_mode,
@@ -1369,7 +1199,7 @@ def ask_question(
             context_chars=0,
             neighbor_window=neighbor_window,
             dedupe_adjacent_chunks=dedupe_adjacent,
-            retrieval_mode=retrieval_mode,
+            retrieval_mode="hybrid",
             semantic_candidate_count=0,
             lexical_candidate_count=0,
             fusion_method="none",
@@ -1391,31 +1221,19 @@ def ask_question(
             "retrieval_meta": retrieval_meta,
         }
 
-    retrieval_strategy = DEFAULT_RETRIEVAL_STRATEGY
-    semantic_matches: list[dict] = []
-    lexical_matches: list[dict] = []
-    if retrieval_mode in {"semantic", "hybrid"}:
-        semantic_matches, semantic_strategy = _semantic_retrieval(
-            db,
-            query_embeddings=query_embeddings,
-            compatible_file_ids=compatible_file_ids,
-            top_k=pool_limit,
-        )
-        retrieval_strategy = semantic_strategy
-    if retrieval_mode in {"lexical", "hybrid"}:
-        lexical_matches = _lexical_retrieval(
-            db,
-            questions=query_variants,
-            compatible_file_ids=compatible_file_ids,
-            top_k=pool_limit,
-        )
-    if retrieval_mode == "semantic":
-        matches = semantic_matches
-    elif retrieval_mode == "lexical":
-        matches = _apply_rrf_to_single_list(lexical_matches)
-        retrieval_strategy = "fts_websearch_rrf"
-    else:
-        matches = _fuse_retrieval_results(semantic_matches, lexical_matches)
+    semantic_matches = _semantic_retrieval(
+        db,
+        query_embedding=query_embedding,
+        compatible_file_ids=compatible_file_ids,
+        top_k=pool_limit,
+    )
+    lexical_matches = _lexical_retrieval(
+        db,
+        question=question,
+        compatible_file_ids=compatible_file_ids,
+        top_k=pool_limit,
+    )
+    matches = _fuse_retrieval_results(semantic_matches, lexical_matches)
 
     # --- Rerank ---
     rerank_input_count = len(matches)
@@ -1426,29 +1244,22 @@ def ask_question(
         rerank_top_n=eff_rerank_top_n,
         rerank_model_name=app_settings.qa_rerank_model_name,
     )
+    before_diversity_docs = len({int(it["chunk"].file_id) for it in matches})
     matches = _apply_diversity_rerank(matches)
     rerank_output_count = len(matches)
 
     candidate_matches = _truncate_ranked_to_candidate_k(matches, candidate_k)
-    score_threshold_applied = _score_threshold_for_mode(retrieval_mode)
+    # Branch threshold by retrieval mode (RRF scores << cosine).
+    score_threshold_applied = MIN_HYBRID_RRF_SCORE if "hybrid" else MIN_SIMILARITY_SCORE
     reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
     compatible_count = len(compatible_file_ids)
-    initial_docs = len({int(it["chunk"].file_id) for it in matches})
-    reliable_docs = len({int(it["chunk"].file_id) for it in reliable_matches})
     logger.info(
-        "QA retrieval mode=%s strategy=%s compatible_files=%s semantic=%s lexical=%s fused=%s unique_docs=%s reliable=%s reliable_docs=%s threshold=%.4f rerank=%s diversity=%s",
-        retrieval_mode,
-        retrieval_strategy,
-        compatible_count,
-        len(semantic_matches),
-        len(lexical_matches),
+        "QA retrieval: mode=hybrid strategy=%s matched=%s reliable=%s unique_docs_before_diversity=%s unique_docs_after_diversity=%s",
+        RETRIEVAL_STRATEGY,
         len(matches),
-        initial_docs,
         len(reliable_matches),
-        reliable_docs,
-        score_threshold_applied,
-        rerank_applied,
-        app_settings.qa_diversity_rerank_enabled,
+        before_diversity_docs,
+        len({int(it['chunk'].file_id) for it in matches}),
     )
 
     try:
@@ -1466,8 +1277,8 @@ def ask_question(
             expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
             expanded_n = len(expanded_items)
             deduped_items = _dedupe_chunk_items(expanded_items)
-            diversified_items = _enforce_doc_diversity(deduped_items)
-            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, diversified_items)
+            diversity_items = _enforce_doc_diversity(deduped_items)
+            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, diversity_items)
             seed_ids = {item["chunk"].id for item in reliable_matches}
             (
                 context_blocks,
@@ -1482,16 +1293,12 @@ def ask_question(
                 max_context_chars=max_context_chars,
                 dedupe_adjacent_chunks=dedupe_adjacent,
             )
-            if packed_n < max(1, int(app_settings.qa_strict_min_citations)):
-                raise QAServiceError(
-                    "NO_RELIABLE_EVIDENCE",
-                    "知识库证据不足，严格模式下无法给出可引用回答。",
-                )
             user_prompt = (
                 "你是实验室内部知识库问答助手。你只允许根据下方「资料片段」回答问题。\n"
                 "要求：\n"
                 "- 结论必须可由资料支撑；不要引入资料未提及的关键事实。\n"
-                "- 若资料来自多个文件且互补，请优先综合增量信息，避免重复转述同一来源的相邻片段。\n"
+                "- 当多个来源提供互补证据时，优先整合这些增量信息；不要机械重复同一来源相邻片段。\n"
+                "- 若单一来源已足够支撑答案，可只基于该来源作答。\n"
                 "- 若资料不足以回答用户问题，请明确说明无法根据当前知识库资料作出完整回答，不要猜测，"
                 "也不要改用通用知识或常识来替代知识库依据。\n\n"
                 f"问题：{question}\n\n资料片段：\n"
@@ -1502,7 +1309,6 @@ def ask_question(
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
             retrieval_meta = _build_retrieval_meta(
-                retrieval_strategy=retrieval_strategy,
                 answer_source="knowledge_base",
                 scope_type=scope_type,
                 strict_mode=strict_mode,
@@ -1518,10 +1324,10 @@ def ask_question(
                 context_chars=context_chars,
                 neighbor_window=neighbor_window,
                 dedupe_adjacent_chunks=dedupe_adjacent,
-                retrieval_mode=retrieval_mode,
+                retrieval_mode="hybrid",
                 semantic_candidate_count=len(semantic_matches),
                 lexical_candidate_count=len(lexical_matches),
-                fusion_method=("rrf" if retrieval_mode == "hybrid" else retrieval_mode),
+                fusion_method="rrf",
                 score_threshold_applied=score_threshold_applied,
                 rerank_enabled=eff_rerank_enabled,
                 rerank_input_count=rerank_input_count,
@@ -1544,8 +1350,8 @@ def ask_question(
             expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
             expanded_n = len(expanded_items)
             deduped_items = _dedupe_chunk_items(expanded_items)
-            diversified_items = _enforce_doc_diversity(deduped_items)
-            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, diversified_items)
+            diversity_items = _enforce_doc_diversity(deduped_items)
+            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, diversity_items)
             seed_ids = {item["chunk"].id for item in reliable_matches}
             (
                 context_blocks,
@@ -1564,7 +1370,8 @@ def ask_question(
                 "你是实验室知识库问答助手。请优先根据下方「资料片段」回答问题。\n"
                 "要求：\n"
                 "- 当资料足以支撑结论时，以资料为准，回答应体现资料中的要点。\n"
-                "- 若多个来源提供互补证据，请合并关键增量信息，不要机械重复同一来源相邻片段。\n"
+                "- 若多个来源提供非重复增量证据，请进行综合；避免重复转述同一来源连续片段。\n"
+                "- 若单一来源已充分回答问题，不必强行扩展到多来源。\n"
                 "- 若资料仅有部分相关信息，可先说明资料中的依据，再在必要时少量结合常识补充，"
                 "但不要与资料矛盾，也不要虚构资料中不存在的内容或引用。\n"
                 "- 若资料明显不足以判断用户问题，请说明资料局限，不要假装资料已覆盖。\n\n"
@@ -1576,7 +1383,6 @@ def ask_question(
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
             retrieval_meta = _build_retrieval_meta(
-                retrieval_strategy=retrieval_strategy,
                 answer_source="knowledge_base",
                 scope_type=scope_type,
                 strict_mode=strict_mode,
@@ -1592,10 +1398,10 @@ def ask_question(
                 context_chars=context_chars,
                 neighbor_window=neighbor_window,
                 dedupe_adjacent_chunks=dedupe_adjacent,
-                retrieval_mode=retrieval_mode,
+                retrieval_mode="hybrid",
                 semantic_candidate_count=len(semantic_matches),
                 lexical_candidate_count=len(lexical_matches),
-                fusion_method=("rrf" if retrieval_mode == "hybrid" else retrieval_mode),
+                fusion_method="rrf",
                 score_threshold_applied=score_threshold_applied,
                 rerank_enabled=eff_rerank_enabled,
                 rerank_input_count=rerank_input_count,
@@ -1636,7 +1442,6 @@ def ask_question(
         answer_src = "knowledge_base_low_confidence" if low_confidence else "model_general"
         refs_payload = {"answer_source": answer_src, "references": []}
         retrieval_meta = _build_retrieval_meta(
-            retrieval_strategy=retrieval_strategy,
             answer_source=answer_src,
             scope_type=scope_type,
             strict_mode=strict_mode,
@@ -1652,10 +1457,10 @@ def ask_question(
             context_chars=0,
             neighbor_window=neighbor_window,
             dedupe_adjacent_chunks=dedupe_adjacent,
-            retrieval_mode=retrieval_mode,
+            retrieval_mode="hybrid",
             semantic_candidate_count=len(semantic_matches),
             lexical_candidate_count=len(lexical_matches),
-            fusion_method=("rrf" if retrieval_mode == "hybrid" else retrieval_mode),
+            fusion_method="rrf",
             score_threshold_applied=score_threshold_applied,
             rerank_enabled=eff_rerank_enabled,
             rerank_input_count=rerank_input_count,
