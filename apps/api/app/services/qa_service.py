@@ -44,6 +44,59 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RETRIEVAL_STRATEGY = "app_layer_cosine_topk"
 
+
+COVERAGE_POLICY = {
+    "synthesis": {
+        "min_source_count": 2,
+        "max_dominant_source_ratio": 0.72,
+        "min_multi_source_coverage": 0.67,
+    },
+    "compare": {
+        "min_source_count": 2,
+        "max_dominant_source_ratio": 0.65,
+        "min_multi_source_coverage": 0.67,
+        "max_asymmetry_ratio": 0.7,
+    },
+    "default": {
+        "min_source_count": 1,
+        "max_dominant_source_ratio": 0.82,
+        "min_multi_source_coverage": 0.34,
+    },
+}
+
+
+def _coverage_policy_for_task(task_type: str) -> dict[str, float]:
+    if task_type == TASK_COMPARE:
+        return COVERAGE_POLICY["compare"]
+    if task_type == TASK_MULTI_DOC_SYNTHESIS:
+        return COVERAGE_POLICY["synthesis"]
+    return COVERAGE_POLICY["default"]
+
+
+def _evaluate_coverage_decision(*, task_type: str, metrics: dict[str, float | int], retrieval_rounds: int, max_rounds: int) -> dict[str, Any]:
+    policy = _coverage_policy_for_task(task_type)
+    source_count = int(metrics.get("source_count") or 0)
+    dom_ratio = float(metrics.get("dominant_source_ratio") or 0.0)
+    coverage = float(metrics.get("multi_source_coverage") or 0.0)
+
+    insufficient = source_count < policy["min_source_count"] or coverage < policy["min_multi_source_coverage"]
+    skewed = dom_ratio > policy["max_dominant_source_ratio"]
+
+    action = "answer"
+    if insufficient and retrieval_rounds < max_rounds:
+        action = "fallback"
+    elif insufficient and retrieval_rounds >= max_rounds:
+        action = "abstain"
+    elif skewed and task_type in {TASK_COMPARE, TASK_MULTI_DOC_SYNTHESIS}:
+        action = "conservative_answer"
+
+    return {
+        "policy": policy,
+        "insufficient": insufficient,
+        "single_source_skew": skewed,
+        "action": action,
+    }
+
 # Upper bound for in-memory ranked pool (top_k vs qa_candidate_k); avoids unbounded scans.
 QA_RETRIEVAL_POOL_CAP = 128
 
@@ -649,11 +702,14 @@ def _compute_source_coverage_metrics(references: list[dict], *, top_k: int) -> d
     total_refs = sum(by_file.values())
     source_count = len(by_file)
     dominant_source_ratio = (max(by_file.values()) / total_refs) if total_refs else 0.0
-    multi_source_coverage = source_count / max(1, min(top_k, 3))
+    coverage_denominator = max(1, min(top_k, 3))
+    multi_source_coverage = min(1.0, source_count / coverage_denominator)
     return {
         "source_count": source_count,
         "dominant_source_ratio": round(dominant_source_ratio, 4),
-        "multi_source_coverage": round(min(1.0, multi_source_coverage), 4),
+        "multi_source_coverage": round(multi_source_coverage, 4),
+        "source_distribution": {str(k): v for k, v in by_file.items()},
+        "coverage_denominator": coverage_denominator,
     }
 
 
@@ -662,7 +718,7 @@ def _build_compare_result(compare_targets: list[str], references: list[dict]) ->
     target_b = compare_targets[1] if len(compare_targets) >= 2 else "B"
     side_a_evidence: list[dict[str, Any]] = []
     side_b_evidence: list[dict[str, Any]] = []
-    ambiguous: list[dict[str, Any]] = []
+    overflow_targets = compare_targets[2:] if len(compare_targets) > 2 else []
     for ref in references:
         if not isinstance(ref, dict):
             continue
@@ -674,38 +730,44 @@ def _build_compare_result(compare_targets: list[str], references: list[dict]) ->
             "snippet": ref.get("snippet"),
             "score": ref.get("score"),
         }
-        signal = " ".join(
-            [
-                str(ref.get("file_name") or ""),
-                str(ref.get("section_title") or ""),
-                str(ref.get("snippet") or ""),
-            ]
-        ).lower()
-        if target_a and target_a.lower() in signal and (not target_b or target_b.lower() not in signal):
+        signal = " ".join([str(ref.get("file_name") or ""), str(ref.get("section_title") or ""), str(ref.get("snippet") or "")]).lower()
+        match_a = target_a and target_a.lower() in signal
+        match_b = target_b and target_b.lower() in signal
+        if match_a and not match_b:
             side_a_evidence.append(candidate)
-        elif target_b and target_b.lower() in signal and (not target_a or target_a.lower() not in signal):
+        elif match_b and not match_a:
             side_b_evidence.append(candidate)
+        elif match_a and match_b:
+            if len(side_a_evidence) <= len(side_b_evidence):
+                side_a_evidence.append(candidate)
+            else:
+                side_b_evidence.append(candidate)
+        elif len(side_a_evidence) <= len(side_b_evidence):
+            side_a_evidence.append(candidate)
         else:
-            ambiguous.append(candidate)
-    for idx, item in enumerate(ambiguous):
-        if idx % 2 == 0:
-            side_a_evidence.append(item)
-        else:
-            side_b_evidence.append(item)
+            side_b_evidence.append(candidate)
 
     common_points: list[str] = []
     differences: list[str] = []
     conflicts: list[str] = []
-    if side_a_evidence and side_b_evidence:
+    min_side = min(len(side_a_evidence), len(side_b_evidence))
+    max_side = max(len(side_a_evidence), len(side_b_evidence), 1)
+    symmetry = round(min_side / max_side, 4)
+    evidence_sufficiency = bool(side_a_evidence and side_b_evidence)
+    asymmetry = symmetry < 0.6
+    if evidence_sufficiency:
         common_points.append("两侧均检索到可引用证据。")
     else:
-        differences.append("两侧证据数量不对称，比较结论需保守。")
-    if abs(len(side_a_evidence) - len(side_b_evidence)) >= 2:
-        conflicts.append("两侧证据覆盖明显不均衡，存在证据偏斜风险。")
+        differences.append("至少一侧证据不足，比较结论仅可作为保守参考。")
+    if asymmetry:
+        conflicts.append("两侧证据分布明显不对称，存在单侧偏结论风险。")
+    if overflow_targets:
+        differences.append("检测到超过两个比较对象，本轮仅稳定比较前两侧。")
 
-    evidence_sufficiency = bool(side_a_evidence and side_b_evidence)
+    compare_confidence = 0.3 + (0.4 if evidence_sufficiency else 0.0) + (0.3 * symmetry)
     return {
-        "comparison_targets": compare_targets,
+        "comparison_targets": compare_targets[:2],
+        "overflow_targets": overflow_targets,
         "side_a_label": target_a,
         "side_b_label": target_b,
         "side_a_evidence": side_a_evidence,
@@ -714,6 +776,9 @@ def _build_compare_result(compare_targets: list[str], references: list[dict]) ->
         "differences": differences,
         "conflicts": conflicts,
         "evidence_sufficiency": evidence_sufficiency,
+        "evidence_symmetry": symmetry,
+        "evidence_asymmetry": asymmetry,
+        "compare_confidence": round(min(1.0, compare_confidence), 4),
     }
 
 
@@ -1829,7 +1894,9 @@ def ask_question(
     reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
     retrieval_rounds = 1
     fallback_triggered = False
-    if not reliable_matches and bool(planned.get("fallback_enabled")):
+    coverage_seed_metrics = _compute_source_coverage_metrics([{"file_id": int(item["chunk"].file_id)} for item in reliable_matches], top_k=top_k)
+    initial_coverage_decision = _evaluate_coverage_decision(task_type=task_type, metrics=coverage_seed_metrics, retrieval_rounds=1, max_rounds=int(planned.get("max_retrieval_rounds", 2)))
+    if (not reliable_matches or initial_coverage_decision.get("action") == "fallback") and bool(planned.get("fallback_enabled")):
         fallback_triggered = True
         retrieval_rounds = 2
         fallback_plan = (planned.get("candidate_plan") or [{}, {}])[1]
@@ -1846,6 +1913,7 @@ def ask_question(
         except RuntimeError:
             fallback_embeddings = []
         if fallback_embeddings:
+            tool_traces.append(summarize_tool_trace("retrieval_fallback_gate", {"triggered": True, "reason": "coverage_or_reliability", "initial_coverage": initial_coverage_decision}))
             fb_semantic, _ = _semantic_retrieval(
                 db,
                 query_embeddings=fallback_embeddings,
@@ -1906,6 +1974,8 @@ def ask_question(
     stop_reason = "enough_evidence" if selected_reliable_matches else (
         "fallback_triggered_but_insufficient" if fallback_triggered else "insufficient_after_round1"
     )
+    if task_type == TASK_COMPARE and source_count <= 1:
+        stop_reason = "compare_evidence_asymmetric"
     source_skew_detected = source_count > 0 and dominant_source_ratio >= 0.8
     if source_skew_detected:
         workflow_steps.append({"step": "single_source_skew_detected", "status": "warning"})
@@ -2006,9 +2076,13 @@ def ask_question(
             if task_type == TASK_COMPARE:
                 workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
             coverage_metrics = _compute_source_coverage_metrics(references, top_k=top_k)
+            coverage_decision = _evaluate_coverage_decision(task_type=task_type, metrics=coverage_metrics, retrieval_rounds=retrieval_rounds, max_rounds=int(planned.get("max_retrieval_rounds", 2)))
+            tool_traces.append(summarize_tool_trace("coverage_policy", coverage_decision))
             compare_result_payload = _build_compare_result(compare_targets, references) if task_type == TASK_COMPARE else None
-            if task_type == TASK_COMPARE and compare_result_payload and not compare_result_payload.get("evidence_sufficiency"):
-                answer = "说明：当前比较两侧证据不对称，结论需谨慎。\n" + answer
+            if task_type == TASK_COMPARE and compare_result_payload and (not compare_result_payload.get("evidence_sufficiency") or compare_result_payload.get("evidence_asymmetry")):
+                answer = "说明：当前比较存在证据不对称，结论需谨慎。\n" + answer
+            if coverage_decision.get("single_source_skew"):
+                answer = "说明：当前回答存在单源倾斜，请结合更多来源复核。\n" + answer
             elif task_type == TASK_MULTI_DOC_SYNTHESIS:
                 workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
             logger.info("strict evidence decision=accept citations=%s", len(references))
@@ -2067,6 +2141,7 @@ def ask_question(
                     "retrieval_rounds": retrieval_rounds,
                     "fallback_triggered": fallback_triggered,
                     "stop_reason": stop_reason,
+                    "coverage_policy_decision": coverage_decision,
                     **coverage_metrics,
                 },
                 compare_result=compare_result_payload,
@@ -2168,9 +2243,20 @@ def ask_question(
                 if task_type == TASK_COMPARE:
                     workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
                 coverage_metrics = _compute_source_coverage_metrics(references, top_k=top_k)
+                coverage_decision = _evaluate_coverage_decision(
+                    task_type=task_type,
+                    metrics=coverage_metrics,
+                    retrieval_rounds=retrieval_rounds,
+                    max_rounds=int(planned.get("max_retrieval_rounds", 2)),
+                )
+                tool_traces.append(summarize_tool_trace("coverage_policy", coverage_decision))
                 compare_result_payload = _build_compare_result(compare_targets, references) if task_type == TASK_COMPARE else None
-                if task_type == TASK_COMPARE and compare_result_payload and not compare_result_payload.get("evidence_sufficiency"):
-                    answer = "说明：当前比较两侧证据不对称，结论需谨慎。\n" + answer
+                if task_type == TASK_COMPARE and compare_result_payload and (
+                    not compare_result_payload.get("evidence_sufficiency") or compare_result_payload.get("evidence_asymmetry")
+                ):
+                    answer = "说明：当前比较存在证据不对称，结论需谨慎。\n" + answer
+                if coverage_decision.get("single_source_skew"):
+                    answer = "说明：当前回答存在单源倾斜，请结合更多来源复核。\n" + answer
                 elif task_type == TASK_MULTI_DOC_SYNTHESIS:
                     workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
                 retrieval_meta = _build_retrieval_meta(
@@ -2228,6 +2314,7 @@ def ask_question(
                         "retrieval_rounds": retrieval_rounds,
                         "fallback_triggered": fallback_triggered,
                         "stop_reason": stop_reason,
+                        "coverage_policy_decision": coverage_decision,
                         **coverage_metrics,
                     },
                     compare_result=compare_result_payload,

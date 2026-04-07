@@ -1,17 +1,17 @@
-# Phase3B Eval Report
+# Phase4 Eval Report
 
 - total: 9
 - passed: 9
 - failed: 0
 
-| id | task | skill | scope | strategy | rounds | fallback | clarify | src_count | dom_ratio | coverage | citations | abstained | reason |
-|---|---|---|---|---|---:|---|---|---:|---:|---:|---:|---|---|
-| p3b-001 | simple_qa | qa_skill | default_kb_scope | single_pass_qa | 1 | False | False | 1 | 1.00 | 0.33 | 1 | False | phase3b_rule_pass |
-| p3b-002 | collection_scoped_qa | scoped_qa_skill | collection_scope | scoped_retrieval | 1 | False | False | 2 | 0.60 | 0.67 | 2 | False | phase3b_rule_pass |
-| p3b-003 | multi_doc_synthesis | synthesis_skill | default_kb_scope | coverage_oriented_synthesis | 2 | True | False | 3 | 0.60 | 1.00 | 3 | False | phase3b_rule_pass |
-| p3b-004 | clarification_needed | clarify_skill | default_kb_scope | clarify_before_retrieval | 1 | False | True | 0 | 1.00 | 0.00 | 0 | True | phase3b_rule_pass |
-| p3b-005 | compare | compare_skill | default_kb_scope | side_by_side_compare_retrieval | 1 | False | False | 2 | 0.60 | 0.67 | 3 | False | phase3b_rule_pass |
-| p3b-006 | multi_doc_synthesis | synthesis_skill | default_kb_scope | coverage_oriented_synthesis | 1 | False | False | 3 | 0.50 | 1.00 | 4 | False | phase3b_rule_pass |
-| p3b-007 | simple_qa | qa_skill | default_kb_scope | single_pass_qa | 1 | False | False | 2 | 0.85 | 0.67 | 2 | False | phase3b_rule_pass |
-| p3b-008 | simple_qa | qa_skill | default_kb_scope | single_pass_qa | 1 | False | False | 1 | 1.00 | 0.33 | 1 | False | phase3b_rule_pass |
-| p3b-009 | abstain_or_insufficient_context | abstain_skill | default_kb_scope | conservative_abstain | 1 | False | False | 0 | 1.00 | 0.00 | 0 | True | phase3b_rule_pass |
+| id | task | scope | skill | rounds | fallback | clarify | guardrails | src_count | dom_ratio | coverage | symmetry | asym | abstained | reason |
+|---|---|---|---|---:|---|---|---|---:|---:|---:|---:|---|---|---|
+| p4-001 | simple_qa | default_kb_scope | qa_skill | 1 | False | False | - | 1 | 1.00 | 0.34 | - | - | False | phase4_rule_pass |
+| p4-002 | collection_scoped_qa | collection_scope | scoped_qa_skill | 1 | False | False | - | 2 | 0.60 | 0.67 | - | - | False | phase4_rule_pass |
+| p4-003 | multi_doc_synthesis | default_kb_scope | synthesis_skill | 2 | True | False | - | 2 | 0.60 | 0.67 | - | - | False | phase4_rule_pass |
+| p4-004 | clarification_needed | default_kb_scope | clarify_skill | 1 | False | True | - | 0 | 1.00 | 0.00 | - | - | True | phase4_rule_pass |
+| p4-005 | compare | default_kb_scope | compare_skill | 1 | False | False | - | 2 | 0.60 | 0.67 | 0.9 | False | False | phase4_rule_pass |
+| p4-006 | compare | default_kb_scope | compare_skill | 1 | False | False | - | 2 | 0.90 | 0.67 | 0.4 | True | True | phase4_rule_pass |
+| p4-007 | simple_qa | default_kb_scope | qa_skill | 1 | False | False | input_guardrail | 1 | 1.00 | 0.33 | - | - | False | phase4_rule_pass |
+| p4-008 | simple_qa | default_kb_scope | qa_skill | 1 | False | False | - | 1 | 1.00 | 0.33 | - | - | False | phase4_rule_pass |
+| p4-009 | abstain_or_insufficient_context | default_kb_scope | abstain_skill | 1 | False | False | - | 0 | 1.00 | 0.00 | - | - | True | phase4_rule_pass |

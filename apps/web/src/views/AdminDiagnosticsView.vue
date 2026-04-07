@@ -72,6 +72,9 @@
             <el-table-column label="fallback" width="95">
               <template #default="scope">{{ scope.row.fallback_triggered ? 'yes' : '-' }}</template>
             </el-table-column>
+            <el-table-column label="skill" min-width="130">
+              <template #default="scope">{{ scope.row.selected_skill || '-' }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="140" fixed="right">
               <template #default="scope">
                 <el-button link type="primary" @click="openDetail(scope.row.trace_id)">查看详情</el-button>
