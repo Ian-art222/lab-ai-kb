@@ -7,6 +7,7 @@ from app.services.qa_service import (
     _select_doc_aware_matches,
     _build_retrieval_meta,
     _build_query_variants,
+    _assemble_evidence_bundles,
     _is_grounded_answer,
     _normalize_retrieval_mode,
     _score_threshold_for_mode,
@@ -65,6 +66,7 @@ class TestQARetrievalLogic(unittest.TestCase):
         )
         self.assertEqual(meta["min_similarity_score"], 0.012)
         self.assertEqual(meta["min_score"], 0.012)
+        self.assertEqual(meta["rewritten_queries"], [])
 
     def test_grounded_answer_guard(self):
         self.assertFalse(_is_grounded_answer("", [{"chunk_id": 1}]))
@@ -136,6 +138,16 @@ class TestQARetrievalLogic(unittest.TestCase):
         self.assertEqual(len(refs), 2)
         self.assertEqual(packed, 2)
         self.assertGreater(rate, 0.0)
+
+    def test_evidence_bundle_grouping(self):
+        refs = [
+            {"file_id": 1, "file_name": "a.md", "chunk_id": 10, "chunk_index": 1, "score": 0.9},
+            {"file_id": 1, "file_name": "a.md", "chunk_id": 11, "chunk_index": 2, "score": 0.7},
+            {"file_id": 2, "file_name": "b.md", "chunk_id": 20, "chunk_index": 5, "score": 0.8},
+        ]
+        out = _assemble_evidence_bundles(refs)
+        self.assertEqual(out["source_count"], 2)
+        self.assertEqual(out["primary_sources"][0]["file_id"], 1)
 
 
 if __name__ == "__main__":

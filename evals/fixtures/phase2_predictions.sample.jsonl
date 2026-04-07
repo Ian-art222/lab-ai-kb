@@ -1,0 +1,7 @@
+{"id":"basic_qa_1","query":"总结项目A的核心目标","predicted_answer":"项目A目标是提高检索准确率。","abstained":false,"abstain_reason":null,"retrieved_sources":[1,2],"citation_count":2,"latency_ms":520}
+{"id":"multi_doc_1","query":"对比文档A和文档B关于实验条件的差异","predicted_answer":"A温度更高，B样本量更大。","abstained":false,"abstain_reason":null,"retrieved_sources":[5,6],"citation_count":3,"latency_ms":630}
+{"id":"compare_1","query":"比较两种方案在成本与精度上的优缺点","predicted_answer":"方案X成本低但精度一般，方案Y相反。","abstained":false,"abstain_reason":null,"retrieved_sources":[7],"citation_count":1,"latency_ms":710}
+{"id":"no_answer_1","query":"知识库中不存在的设备序列号是什么","predicted_answer":"当前资料不足，无法确认。","abstained":true,"abstain_reason":"no_retrieval_hit","retrieved_sources":[],"citation_count":0,"latency_ms":410}
+{"id":"conflict_1","query":"同一实验结果在两份记录中的结论是否一致","predicted_answer":"两份记录存在冲突。","abstained":true,"abstain_reason":"conflicting_evidence","retrieved_sources":[11,12],"citation_count":2,"latency_ms":580}
+{"id":"noise_1","query":"从乱码文本中提取可靠结论","predicted_answer":"文本质量不足，建议补充清晰文档。","abstained":true,"abstain_reason":"low_retrieval_confidence","retrieved_sources":[15],"citation_count":0,"latency_ms":430}
+{"id":"single_source_risk_1","query":"请综述该主题并覆盖多个来源","predicted_answer":"仅基于单一来源进行了回答。","abstained":false,"abstain_reason":null,"retrieved_sources":[21],"citation_count":1,"latency_ms":490}

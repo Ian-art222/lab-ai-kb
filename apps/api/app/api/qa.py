@@ -1,4 +1,6 @@
 from threading import Lock
+import time
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -7,7 +9,8 @@ from app.core.auth import get_current_user
 from app.db.session import SessionLocal, get_db
 from app.models.file_record import FileRecord
 from app.models.user import User
-from app.services.ingest_service import ingest_file_job as run_file_ingest
+from app.services.ingest_service import ingest_file_job as run_file_ingest, resolve_index_start_status
+from app.services.failure_case_service import record_failure_case
 from app.services.qa_service import (
     QAServiceError,
     append_qa_failure,
@@ -20,6 +23,7 @@ from app.services.qa_service import (
     persist_qa_citations,
     persist_retrieval_trace,
 )
+from app.services.reason_codes import ReasonCode
 from app.services.settings_service import mark_last_qa_status
 from app.schemas.qa import AskRequest, AskSuccessResponse, IngestFileRequest
 
@@ -27,6 +31,16 @@ router = APIRouter(prefix="/api/qa", tags=["qa"])
 
 _active_ingest_file_ids: set[int] = set()
 _active_ingest_lock = Lock()
+
+
+def _map_qa_error_to_reason(code: str | None) -> str:
+    mapping = {
+        "NO_RELIABLE_EVIDENCE": ReasonCode.STRICT_MODE_BLOCKED.value,
+        "NO_COMPATIBLE_INDEXED_CONTENT": ReasonCode.NO_RETRIEVAL_HIT.value,
+        "EMBEDDING_DATA_UNAVAILABLE": ReasonCode.RETRIEVAL_FAILED.value,
+        "MODEL_REQUEST_FAILED": ReasonCode.MODEL_GENERATION_FAILED.value,
+    }
+    return mapping.get(code or "", ReasonCode.INTERNAL_ERROR.value)
 
 
 def _run_ingest_in_background(file_id: int) -> None:
@@ -49,6 +63,9 @@ def ask_question(
     current_user: User = Depends(get_current_user),
 ):
     session = None
+    request_id = str(uuid4())
+    trace_id = str(uuid4())
+    started = time.perf_counter()
     try:
         session = ensure_session(
             db,
@@ -83,6 +100,7 @@ def ask_question(
         if isinstance(refs, list):
             persist_qa_citations(db, message_id=assistant_message.id, references=refs)
         meta = result.get("retrieval_meta")
+        latency_ms = (time.perf_counter() - started) * 1000
         persist_retrieval_trace(
             db,
             session_id=session.id,
@@ -90,11 +108,29 @@ def ask_question(
             question=payload.question,
             retrieval_meta=meta if isinstance(meta, dict) else None,
             answer_source=result.get("answer_source"),
+            trace_id=trace_id,
+            request_id=request_id,
+            evidence_bundles=result.get("evidence_bundles") if isinstance(result.get("evidence_bundles"), dict) else None,
+            latency_ms=latency_ms,
         )
+        if result.get("answer_source") != "knowledge_base":
+            record_failure_case(
+                {
+                    "trace_id": trace_id,
+                    "request_id": request_id,
+                    "query": payload.question,
+                    "reason": (meta or {}).get("abstain_reason"),
+                    "answer_source": result.get("answer_source"),
+                    "references": result.get("references", []),
+                    "answer_preview": (result.get("answer") or "")[:400],
+                }
+            )
         mark_last_qa_status(db, success=True, error_message=None)
         return {
             "session_id": session.id,
             "assistant_message_id": assistant_message.id,
+            "trace_id": trace_id,
+            "request_id": request_id,
             **result,
         }
     except RuntimeError as exc:
@@ -110,9 +146,23 @@ def ask_question(
                 session_id=session.id,
                 assistant_message_id=assistant_message.id,
                 question=payload.question,
-                retrieval_meta=None,
+                retrieval_meta={"failure_reason": ReasonCode.INTERNAL_ERROR.value, "is_abstained": True},
                 answer_source="error",
+                trace_id=trace_id,
+                request_id=request_id,
+                latency_ms=(time.perf_counter() - started) * 1000,
                 debug_json={"message": str(exc)},
+            )
+            record_failure_case(
+                {
+                    "trace_id": trace_id,
+                    "request_id": request_id,
+                    "query": payload.question,
+                    "reason": ReasonCode.INTERNAL_ERROR.value,
+                    "answer_source": "error",
+                    "references": [],
+                    "answer_preview": str(exc)[:400],
+                }
             )
         mark_last_qa_status(db, success=False, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -130,9 +180,23 @@ def ask_question(
                 session_id=session.id,
                 assistant_message_id=assistant_message.id,
                 question=payload.question,
-                retrieval_meta=None,
+                retrieval_meta={"failure_reason": _map_qa_error_to_reason(exc.code), "is_abstained": True},
                 answer_source="error",
+                trace_id=trace_id,
+                request_id=request_id,
+                latency_ms=(time.perf_counter() - started) * 1000,
                 debug_json={"code": exc.code, "message": exc.message},
+            )
+            record_failure_case(
+                {
+                    "trace_id": trace_id,
+                    "request_id": request_id,
+                    "query": payload.question,
+                    "reason": _map_qa_error_to_reason(exc.code),
+                    "answer_source": "error",
+                    "references": [],
+                    "answer_preview": exc.message[:400],
+                }
             )
         mark_last_qa_status(db, success=False, error_message=exc.message)
         raise HTTPException(
@@ -153,7 +217,13 @@ def ingest_file(
         raise HTTPException(status_code=404, detail="文件不存在")
 
     with _active_ingest_lock:
-        already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status == "indexing"
+        already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status in {
+            "indexing",
+            "parsing",
+            "chunking",
+            "embedding",
+            "reindexing",
+        }
         if not already_running:
             _active_ingest_file_ids.add(payload.file_id)
 
@@ -164,10 +234,15 @@ def ingest_file(
             "indexed_at": file_record.indexed_at,
             "index_error": file_record.index_error,
             "index_warning": file_record.index_warning,
+            "retry_count": file_record.retry_count,
+            "last_error_code": file_record.last_error_code,
+            "pipeline_version": file_record.pipeline_version,
             "queued": False,
         }
 
-    file_record.index_status = "indexing"
+    file_record.index_status = resolve_index_start_status(
+        file_record.index_status, force_reindex=payload.force_reindex
+    )
     file_record.index_error = None
     file_record.index_warning = None
     file_record.indexed_at = None
@@ -181,6 +256,9 @@ def ingest_file(
         "indexed_at": file_record.indexed_at,
         "index_error": file_record.index_error,
         "index_warning": file_record.index_warning,
+        "retry_count": file_record.retry_count,
+        "last_error_code": file_record.last_error_code,
+        "pipeline_version": file_record.pipeline_version,
         "queued": True,
     }
 
@@ -201,6 +279,9 @@ def get_file_index_status(
         "indexed_at": file_record.indexed_at,
         "index_error": file_record.index_error,
         "index_warning": file_record.index_warning,
+        "retry_count": file_record.retry_count,
+        "last_error_code": file_record.last_error_code,
+        "pipeline_version": file_record.pipeline_version,
     }
 
 

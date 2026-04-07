@@ -1,0 +1,7 @@
+{"id":"basic_qa_1","query":"总结项目A的核心目标","expected_behavior":"answer_or_abstain_with_reason","category":"basic_qa"}
+{"id":"multi_doc_1","query":"对比文档A和文档B关于实验条件的差异","expected_behavior":"multi_source_answer","category":"multi_doc"}
+{"id":"compare_1","query":"比较两种方案在成本与精度上的优缺点","expected_behavior":"structured_compare","category":"compare"}
+{"id":"no_answer_1","query":"知识库中不存在的设备序列号是什么","expected_behavior":"abstain","category":"no_answer"}
+{"id":"conflict_1","query":"同一实验结果在两份记录中的结论是否一致","expected_behavior":"flag_conflict","category":"conflicting_evidence"}
+{"id":"noise_1","query":"从乱码文本中提取可靠结论","expected_behavior":"abstain_or_low_confidence","category":"low_quality_text"}
+{"id":"single_source_risk_1","query":"请综述该主题并覆盖多个来源","expected_behavior":"multi_source_preferred","category":"single_source_bias"}

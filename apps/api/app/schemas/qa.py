@@ -64,6 +64,12 @@ class RetrievalMetaPayload(BaseModel):
     rerank_applied: bool | None = None
     parent_recovered_chunks: int | None = None
     parent_deduped_groups: int | None = None
+    normalized_query: str | None = None
+    rewritten_queries: list[str] | None = None
+    abstain_reason: str | None = None
+    failure_reason: str | None = None
+    is_abstained: bool | None = None
+    model_name: str | None = None
 
 
 class AskSuccessResponse(BaseModel):
@@ -71,9 +77,12 @@ class AskSuccessResponse(BaseModel):
 
     session_id: int
     assistant_message_id: int
+    trace_id: str | None = None
+    request_id: str | None = None
     answer: str
     references: list[Any]
     references_json: Any
+    evidence_bundles: Any | None = None
     answer_source: str
     used_files: list[int]
     retrieval_meta: RetrievalMetaPayload

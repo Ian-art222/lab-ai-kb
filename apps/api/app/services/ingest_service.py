@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,16 @@ MIN_MEANINGFUL_TEXT_CHARS = 5
 MAX_INDEX_TEXT_CHARS = app_settings.ingest_max_index_text_chars
 
 logger = logging.getLogger(__name__)
+PIPELINE_VERSION = "v2_phase2"
+
+
+def resolve_index_start_status(current_status: str | None, *, force_reindex: bool = False) -> str:
+    current = (current_status or "").strip().lower()
+    if force_reindex:
+        return "reindexing"
+    if current in {"failed", "stale", "indexed", "reindexing"}:
+        return "reindexing"
+    return "parsing"
 
 
 def _resolve_file_path(file_record: FileRecord) -> Path:
@@ -38,6 +49,8 @@ def _extract_text(file_record: FileRecord, file_path: Path) -> str:
     file_type = (file_record.file_type or "").lower()
 
     if file_type in {"txt", "md"}:
+        return file_path.read_text(encoding="utf-8")
+    if file_type in {"csv", "tsv"}:
         return file_path.read_text(encoding="utf-8")
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
@@ -79,6 +92,9 @@ def _split_markdown_sections(text: str) -> list[dict]:
                 "section_title": current_title,
                 "heading_level": current_heading_level,
                 "block_type": block_type,
+                "section_path": [current_title] if current_title else [],
+                "parent_section": current_title,
+                "source_type": "markdown",
             }
         )
 
@@ -121,6 +137,9 @@ def _split_paragraph_segments(
                 "page_number": page_number,
                 "section_title": section_title or _guess_section_title(content),
                 "block_type": "table" if _looks_like_text_table(content) else block_type,
+                "section_path": [section_title] if section_title else [],
+                "parent_section": section_title,
+                "source_type": "paragraph",
             }
         )
     return segments
@@ -147,6 +166,21 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
             if md_segments:
                 return md_segments
         return _split_paragraph_segments(text, page_number=None)
+    if file_type in {"csv", "tsv"}:
+        text = file_path.read_text(encoding="utf-8")
+        rows = [line.strip() for line in text.splitlines() if line.strip()]
+        return [
+            {
+                "text": row,
+                "page_number": None,
+                "section_title": "tabular_rows",
+                "block_type": "table",
+                "section_path": ["tabular_rows"],
+                "parent_section": "tabular_rows",
+                "source_type": file_type,
+            }
+            for row in rows
+        ]
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
         segments: list[dict] = []
@@ -186,6 +220,9 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
                     "page_number": None,
                     "section_title": current_heading or _guess_section_title(text),
                     "block_type": "paragraph",
+                    "section_path": [current_heading] if current_heading else [],
+                    "parent_section": current_heading,
+                    "source_type": "docx",
                 }
             )
         return segments
@@ -221,6 +258,9 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
                     "section_title": segment.get("section_title"),
                     "block_type": segment.get("block_type"),
                     "heading_level": segment.get("heading_level"),
+                    "section_path": segment.get("section_path"),
+                    "parent_section": segment.get("parent_section"),
+                    "source_type": segment.get("source_type"),
                 }
             )
             truncated = True
@@ -232,6 +272,9 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
                 "section_title": segment.get("section_title"),
                 "block_type": segment.get("block_type"),
                 "heading_level": segment.get("heading_level"),
+                "section_path": segment.get("section_path"),
+                "parent_section": segment.get("parent_section"),
+                "source_type": segment.get("source_type"),
             }
         )
         total += len(content)
@@ -333,6 +376,7 @@ def _mark_index_success(
     file_record.index_embedding_provider = index_embedding_provider
     file_record.index_embedding_model = index_embedding_model
     file_record.index_embedding_dimension = index_embedding_dimension
+    file_record.last_error_code = None
     db.commit()
     db.refresh(file_record)
     return file_record
@@ -353,6 +397,8 @@ def _mark_index_failure(
     file_record.indexed_at = None
     file_record.index_error = error_message
     file_record.index_warning = None
+    file_record.retry_count = (file_record.retry_count or 0) + 1
+    file_record.last_error_code = "ingest_failed"
     file_record.index_embedding_provider = None
     file_record.index_embedding_model = None
     file_record.index_embedding_dimension = None
@@ -372,13 +418,14 @@ def ingest_file_job(
     prepare_indexing: bool,
 ) -> FileRecord:
     if prepare_indexing:
-        file_record.index_status = "indexing"
+        file_record.index_status = resolve_index_start_status(file_record.index_status)
         file_record.index_error = None
         file_record.index_warning = None
         file_record.indexed_at = None
         file_record.index_embedding_provider = None
         file_record.index_embedding_model = None
         file_record.index_embedding_dimension = None
+        file_record.pipeline_version = PIPELINE_VERSION
         db.commit()
         db.refresh(file_record)
     file_path = _resolve_file_path(file_record)
@@ -390,6 +437,8 @@ def ingest_file_job(
             raise ValueError("文件为空，无法建立索引")
 
         text = _extract_text(file_record, file_path)
+        file_record.index_status = "chunking"
+        db.commit()
         segments = _extract_segments(file_record, file_path)
         if not text.strip():
             raise ValueError("文件解析完成，但未提取到可用文本内容")
@@ -410,13 +459,26 @@ def ingest_file_job(
             page_no = segment.get("page_number")
             section_guess = segment.get("section_title") or _guess_section_title(seg_text)
             block_type = segment.get("block_type") or "paragraph"
+            section_path = segment.get("section_path") or ([section_guess] if section_guess else [])
+            source_type = segment.get("source_type") or (file_record.file_type or "").lower() or "text"
+            parent_section = segment.get("parent_section") or section_guess
+            seg_hash = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
             parent_meta = {
+                "doc_id": file_record.id,
+                "file_id": file_record.id,
+                "filename": file_record.file_name,
                 "source_file_name": file_record.file_name,
                 "page_number": page_no,
+                "page_range": [page_no, page_no] if page_no is not None else None,
                 "section_title": section_guess,
+                "section_path": section_path,
+                "parent_section": parent_section,
                 "segment_order": seg_idx,
                 "chunk_role": "parent",
                 "block_type": block_type,
+                "source_type": source_type,
+                "content_hash": seg_hash,
+                "pipeline_version": PIPELINE_VERSION,
             }
             parent_row_index = len(rows_spec)
             rows_spec.append(
@@ -438,14 +500,25 @@ def ingest_file_job(
             )
             for ci, ch in enumerate(segment_chunks or []):
                 child_meta = {
+                    "doc_id": file_record.id,
+                    "file_id": file_record.id,
+                    "filename": file_record.file_name,
                     "source_file_name": file_record.file_name,
                     "page_number": ch.get("page_number"),
+                    "page_range": [ch.get("page_number"), ch.get("page_number")]
+                    if ch.get("page_number") is not None
+                    else None,
                     "section_title": ch.get("section_title"),
+                    "section_path": section_path,
+                    "parent_section": parent_section,
                     "segment_order": seg_idx,
                     "child_index_in_segment": ci,
                     "chunk_role": "child",
                     "parent_row_index": parent_row_index,
                     "block_type": ch.get("block_type") or block_type,
+                    "source_type": source_type,
+                    "content_hash": hashlib.sha256(ch["content"].encode("utf-8")).hexdigest(),
+                    "pipeline_version": PIPELINE_VERSION,
                 }
                 rows_spec.append(
                     {
@@ -491,6 +564,8 @@ def ingest_file_job(
             and settings.embedding_api_key
             and settings.embedding_model
         ):
+            file_record.index_status = "embedding"
+            db.commit()
             current_index_standard = build_embedding_index_standard(
                 embedding_provider=settings.embedding_provider,
                 embedding_model=settings.embedding_model,

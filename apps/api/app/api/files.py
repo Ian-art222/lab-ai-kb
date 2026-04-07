@@ -52,6 +52,9 @@ def _serialize_file_item(file_record: FileRecord, folder_name: str | None) -> di
         "index_warning": file_record.index_warning,
         "mime_type": file_record.mime_type,
         "file_size": file_record.file_size,
+        "retry_count": file_record.retry_count,
+        "last_error_code": file_record.last_error_code,
+        "pipeline_version": file_record.pipeline_version,
     }
 
 

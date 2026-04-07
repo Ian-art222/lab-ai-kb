@@ -17,6 +17,9 @@ class FileItem(BaseModel):
     index_warning: str | None = None
     mime_type: str | None = None
     file_size: int | None = None
+    retry_count: int | None = None
+    last_error_code: str | None = None
+    pipeline_version: str | None = None
 
     model_config = {"from_attributes": True}
 

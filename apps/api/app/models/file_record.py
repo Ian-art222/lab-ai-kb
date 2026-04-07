@@ -28,6 +28,9 @@ class FileRecord(Base):
     index_embedding_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     index_embedding_dimension: Mapped[int | None] = mapped_column(Integer, nullable=True)
     extracted_text_length: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pipeline_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Temporary nullable for backward compatibility until upload logic writes it.

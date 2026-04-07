@@ -16,6 +16,7 @@ from app.models.folder import Folder
 from app.models.knowledge import KnowledgeChunk, QACitation, QAMessage, QARetrievalTrace, QASession
 from app.models.system_setting import SystemSetting
 from app.services.model_service import chat_completion, embed_texts
+from app.services.reason_codes import ReasonCode
 from app.services.settings_service import build_embedding_index_standard
 
 MIN_SIMILARITY_SCORE = 0.25
@@ -122,6 +123,12 @@ def _build_retrieval_meta(
     diversity_rerank_enabled: bool = False,
     diversity_rerank_applied: bool = False,
     diversity_rerank_fetch_k: int = 0,
+    normalized_query: str | None = None,
+    rewritten_queries: list[str] | None = None,
+    abstain_reason: str | None = None,
+    failure_reason: str | None = None,
+    is_abstained: bool | None = None,
+    model_name: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -165,6 +172,12 @@ def _build_retrieval_meta(
         "diversity_rerank_enabled": diversity_rerank_enabled,
         "diversity_rerank_applied": diversity_rerank_applied,
         "diversity_rerank_fetch_k": diversity_rerank_fetch_k,
+        "normalized_query": normalized_query,
+        "rewritten_queries": rewritten_queries or [],
+        "abstain_reason": abstain_reason,
+        "failure_reason": failure_reason,
+        "is_abstained": is_abstained,
+        "model_name": model_name,
     }
 
 
@@ -528,6 +541,45 @@ def _pack_context_and_references(
 
     redundancy_rate = suppressed_redundant / considered if considered else 0.0
     return context_blocks, references, used_files, total_chars, len(references), parent_recovered_chunks, redundancy_rate
+
+
+def _assemble_evidence_bundles(references: list[dict]) -> dict:
+    by_file: dict[int, dict] = {}
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        file_id = int(ref.get("file_id", 0))
+        if file_id <= 0:
+            continue
+        bucket = by_file.setdefault(
+            file_id,
+            {
+                "file_id": file_id,
+                "file_name": ref.get("file_name"),
+                "max_score": 0.0,
+                "citations": [],
+            },
+        )
+        score = float(ref.get("score") or 0.0)
+        bucket["max_score"] = max(bucket["max_score"], score)
+        bucket["citations"].append(
+            {
+                "chunk_id": ref.get("chunk_id"),
+                "chunk_index": ref.get("chunk_index"),
+                "section_title": ref.get("section_title"),
+                "page_number": ref.get("page_number"),
+                "score": score,
+            }
+        )
+
+    ranked = sorted(by_file.values(), key=lambda item: item["max_score"], reverse=True)
+    primary = ranked[:2]
+    supplemental = ranked[2:]
+    return {
+        "primary_sources": primary,
+        "supplementary_sources": supplemental,
+        "source_count": len(ranked),
+    }
 
 
 class QAServiceError(Exception):
@@ -1364,6 +1416,7 @@ def ask_question(
     pool_limit = min(QA_RETRIEVAL_POOL_CAP, max(MIN_TOP_K, top_k, candidate_k))
 
     retrieval_mode = _normalize_retrieval_mode(app_settings.qa_retrieval_mode)
+    normalized_query = " ".join((question or "").split()).strip()
     query_variants = _build_query_variants(question)
     try:
         query_embeddings = embed_texts(
@@ -1437,11 +1490,17 @@ def ask_question(
             rerank_applied=False,
             parent_recovered_chunks=0,
             parent_deduped_groups=0,
+            normalized_query=normalized_query,
+            rewritten_queries=query_variants,
+            abstain_reason=ReasonCode.NO_RETRIEVAL_HIT.value,
+            is_abstained=True,
+            model_name=settings.llm_model,
         )
         return {
             "answer": answer,
             "references": [],
             "references_json": refs_payload,
+            "evidence_bundles": None,
             "answer_source": "model_general",
             "used_files": [],
             "retrieval_meta": retrieval_meta,
@@ -1631,11 +1690,17 @@ def ask_question(
                 diversity_rerank_enabled=diversity_rerank_enabled,
                 diversity_rerank_applied=diversity_applied,
                 diversity_rerank_fetch_k=diversity_rerank_fetch_k,
+                normalized_query=normalized_query,
+                rewritten_queries=query_variants,
+                is_abstained=False,
+                model_name=settings.llm_model,
             )
+            evidence_bundles = _assemble_evidence_bundles(references)
             return {
                 "answer": answer,
                 "references": references,
                 "references_json": references,
+                "evidence_bundles": evidence_bundles,
                 "answer_source": "knowledge_base",
                 "used_files": used_files,
                 "retrieval_meta": retrieval_meta,
@@ -1726,11 +1791,17 @@ def ask_question(
                     diversity_rerank_enabled=diversity_rerank_enabled,
                     diversity_rerank_applied=diversity_applied,
                     diversity_rerank_fetch_k=diversity_rerank_fetch_k,
+                    normalized_query=normalized_query,
+                    rewritten_queries=query_variants,
+                    is_abstained=False,
+                    model_name=settings.llm_model,
                 )
+                evidence_bundles = _assemble_evidence_bundles(references)
                 return {
                     "answer": answer,
                     "references": references,
                     "references_json": references,
+                    "evidence_bundles": evidence_bundles,
                     "answer_source": "knowledge_base",
                     "used_files": used_files,
                     "retrieval_meta": retrieval_meta,
@@ -1787,11 +1858,21 @@ def ask_question(
             rerank_applied=rerank_applied,
             parent_recovered_chunks=0,
             parent_deduped_groups=0,
+            normalized_query=normalized_query,
+            rewritten_queries=query_variants,
+            abstain_reason=(
+                ReasonCode.LOW_RETRIEVAL_CONFIDENCE.value
+                if low_confidence
+                else ReasonCode.NO_RETRIEVAL_HIT.value
+            ),
+            is_abstained=True,
+            model_name=settings.llm_model,
         )
         return {
             "answer": answer,
             "references": [],
             "references_json": refs_payload,
+            "evidence_bundles": None,
             "answer_source": answer_src,
             "used_files": [],
             "retrieval_meta": retrieval_meta,
@@ -1850,6 +1931,10 @@ def persist_retrieval_trace(
     question: str,
     retrieval_meta: dict | None,
     answer_source: str | None,
+    trace_id: str | None = None,
+    request_id: str | None = None,
+    evidence_bundles: dict | None = None,
+    latency_ms: float | None = None,
     debug_json: dict | None = None,
 ) -> None:
     """Persist one retrieval trace row (success or failure)."""
@@ -1859,6 +1944,8 @@ def persist_retrieval_trace(
         session_id=session_id,
         assistant_message_id=assistant_message_id,
         question=question,
+        trace_id=trace_id,
+        request_id=request_id,
         retrieval_mode=meta.get("retrieval_mode"),
         fusion_method=meta.get("fusion_method"),
         top_k=meta.get("top_k"),
@@ -1871,6 +1958,18 @@ def persist_retrieval_trace(
         rerank_enabled=meta.get("rerank_enabled"),
         rerank_applied=meta.get("rerank_applied"),
         rerank_model_name=meta.get("rerank_model_name"),
+        is_abstained=meta.get("is_abstained"),
+        abstain_reason=meta.get("abstain_reason"),
+        failure_reason=meta.get("failure_reason"),
+        model_name=meta.get("model_name"),
+        latency_ms=latency_ms,
+        filters_json=meta.get("filters"),
+        evidence_bundles_json=evidence_bundles,
+        token_usage_json=meta.get("token_usage"),
+        task_type=meta.get("task_type"),
+        tool_traces_json=meta.get("tool_traces"),
+        workflow_steps_json=meta.get("workflow_steps"),
+        session_context_json=meta.get("session_context"),
         debug_json=dbg,
     )
     db.add(trace)

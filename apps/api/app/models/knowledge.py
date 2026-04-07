@@ -114,6 +114,8 @@ class QARetrievalTrace(Base):
         index=True,
     )
     question: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True, index=True)
     retrieval_mode: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
     fusion_method: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
     top_k: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
@@ -126,6 +128,18 @@ class QARetrievalTrace(Base):
     rerank_enabled: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     rerank_applied: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     rerank_model_name: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    is_abstained: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    abstain_reason: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    filters_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    evidence_bundles_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    token_usage_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    task_type: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
+    tool_traces_json: Mapped[list | dict | None] = mapped_column(JSONB, nullable=True)
+    workflow_steps_json: Mapped[list | dict | None] = mapped_column(JSONB, nullable=True)
+    session_context_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     debug_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime, default=datetime.utcnow, nullable=False

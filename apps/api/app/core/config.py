@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     ingest_min_chunk_chars: int = 80
     ingest_max_index_text_chars: int = 200000
     ingest_pdf_min_chars_per_page: int = 20
+    qa_failure_cases_path: str = "evals/reports/failure_cases.jsonl"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
