@@ -8,6 +8,8 @@ from app.services.qa_service import (
     _build_retrieval_meta,
     _build_query_variants,
     _assemble_evidence_bundles,
+    _build_compare_result,
+    _compute_source_coverage_metrics,
     _is_grounded_answer,
     _normalize_retrieval_mode,
     _score_threshold_for_mode,
@@ -199,6 +201,27 @@ class TestQARetrievalLogic(unittest.TestCase):
         out = _assemble_evidence_bundles(refs)
         self.assertEqual(out["source_count"], 2)
         self.assertEqual(out["primary_sources"][0]["file_id"], 1)
+
+    def test_source_coverage_metrics(self):
+        refs = [
+            {"file_id": 1, "chunk_id": 10},
+            {"file_id": 1, "chunk_id": 11},
+            {"file_id": 2, "chunk_id": 21},
+        ]
+        metrics = _compute_source_coverage_metrics(refs, top_k=6)
+        self.assertEqual(metrics["source_count"], 2)
+        self.assertGreater(metrics["dominant_source_ratio"], 0.6)
+        self.assertGreater(metrics["multi_source_coverage"], 0.6)
+
+    def test_compare_result_bucketed(self):
+        refs = [
+            {"file_id": 1, "file_name": "A.md", "chunk_id": 1, "chunk_index": 1, "snippet": "A feature", "score": 0.9},
+            {"file_id": 2, "file_name": "B.md", "chunk_id": 2, "chunk_index": 1, "snippet": "B feature", "score": 0.88},
+        ]
+        result = _build_compare_result(["A", "B"], refs)
+        self.assertIn("side_a_evidence", result)
+        self.assertIn("side_b_evidence", result)
+        self.assertEqual(len(result["side_a_evidence"]) + len(result["side_b_evidence"]), 2)
 
 
 if __name__ == "__main__":

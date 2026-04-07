@@ -19,6 +19,21 @@ export type TraceItem = {
   token_usage?: Record<string, unknown> | null
   latency_ms?: number | null
   latency_breakdown?: Record<string, unknown> | null
+  task_type?: string | null
+  selected_scope?: string | null
+  selected_skill?: string | null
+  planner_meta?: Record<string, unknown> | null
+  workflow_steps?: Array<Record<string, unknown>> | null
+  tool_traces?: Array<Record<string, unknown>> | null
+  guardrail_events?: Array<Record<string, unknown>> | null
+  fallback_triggered?: boolean | null
+  retrieval_rounds?: number | null
+  stop_reason?: string | null
+  source_count?: number | null
+  dominant_source_ratio?: number | null
+  multi_source_coverage?: number | null
+  compare_result?: Record<string, unknown> | null
+  clarification_needed?: boolean | null
   created_at: string
 }
 

@@ -289,6 +289,14 @@
                 检索到片段但相似度低于采用阈值，未将片段作为引用依据；以下回答由模型基于通用知识生成
               </div>
               <div class="message-content">{{ m.content }}</div>
+              <div v-if="m.role === 'assistant' && m.state === 'normal' && (m.taskType || m.selectedSkill || m.workflowSummary)" class="workflow-pill-wrap">
+                <el-tag size="small" type="info" effect="plain">task: {{ m.taskType || '—' }}</el-tag>
+                <el-tag size="small" type="success" effect="plain">skill: {{ m.selectedSkill || '—' }}</el-tag>
+                <el-tag v-if="m.isCompareMode" size="small" type="warning" effect="plain">比较模式</el-tag>
+                <el-tag v-if="m.clarificationNeeded" size="small" type="danger" effect="plain">需要澄清</el-tag>
+                <el-tag v-if="m.fallbackTriggered" size="small" type="warning" effect="plain">追加检索已触发</el-tag>
+                <span class="workflow-summary-text">{{ m.workflowSummary || '—' }}</span>
+              </div>
 
               <details
                 v-if="m.role === 'assistant' && m.state === 'normal' && m.retrievalMeta"
@@ -425,6 +433,12 @@ type ChatMessage = {
   references?: AskReference[]
   retrievalMeta?: Partial<RetrievalMeta>
   answerSource?: AnswerSource
+  taskType?: string | null
+  selectedSkill?: string | null
+  workflowSummary?: string | null
+  clarificationNeeded?: boolean
+  fallbackTriggered?: boolean
+  isCompareMode?: boolean
 }
 
 type RetrievalMetaRow = { label: string; value: string }
@@ -466,6 +480,14 @@ const retrievalMetaRows = (meta: Partial<RetrievalMeta>): RetrievalMetaRow[] => 
     { label: 'rerank_applied', value: fmt(meta.rerank_applied) },
     { label: 'parent_recovered_chunks', value: fmt(meta.parent_recovered_chunks) },
     { label: 'parent_deduped_groups', value: fmt(meta.parent_deduped_groups) },
+    { label: 'task_type', value: fmt(meta.task_type) },
+    { label: 'selected_skill', value: fmt(meta.selected_skill) },
+    { label: 'workflow_summary', value: fmt(meta.workflow_summary) },
+    { label: 'fallback_triggered', value: fmt(meta.fallback_triggered) },
+    { label: 'stop_reason', value: fmt(meta.stop_reason) },
+    { label: 'source_count', value: fmt(meta.source_count) },
+    { label: 'dominant_source_ratio', value: fmt(meta.dominant_source_ratio) },
+    { label: 'multi_source_coverage', value: fmt(meta.multi_source_coverage) },
   ]
 }
 
@@ -838,6 +860,12 @@ const handleAsk = async () => {
             references: res.references,
             retrievalMeta: res.retrieval_meta,
             answerSource: res.answer_source,
+            taskType: res.task_type ?? res.retrieval_meta?.task_type ?? null,
+            selectedSkill: res.selected_skill ?? res.retrieval_meta?.selected_skill ?? null,
+            workflowSummary: res.workflow_summary ?? res.retrieval_meta?.workflow_summary ?? null,
+            clarificationNeeded: Boolean(res.clarification_needed ?? res.retrieval_meta?.clarification_needed),
+            fallbackTriggered: Boolean(res.retrieval_meta?.fallback_triggered),
+            isCompareMode: (res.task_type ?? res.retrieval_meta?.task_type) === 'compare',
           }
         : item,
     )
@@ -1668,6 +1696,17 @@ onMounted(async () => {
   border: 1px solid rgba(228, 205, 185, 0.5);
 }
 .message-content { white-space: pre-wrap; line-height: 1.7; }
+.workflow-pill-wrap {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.workflow-summary-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
 .retrieval-details {
   margin-top: 10px;
   border-radius: 10px;

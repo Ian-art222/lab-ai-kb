@@ -50,6 +50,16 @@ export interface RetrievalMeta {
   rerank_applied?: boolean | null
   parent_recovered_chunks?: number | null
   parent_deduped_groups?: number | null
+  task_type?: string | null
+  selected_skill?: string | null
+  workflow_summary?: string | null
+  fallback_triggered?: boolean | null
+  stop_reason?: string | null
+  source_count?: number | null
+  dominant_source_ratio?: number | null
+  multi_source_coverage?: number | null
+  clarification_needed?: boolean | null
+  compare_result?: Record<string, unknown> | null
 }
 
 export interface AskResponse {
@@ -60,6 +70,12 @@ export interface AskResponse {
   used_files: number[]
   retrieval_meta: RetrievalMeta
   answer_source: AnswerSource
+  task_type?: string | null
+  selected_skill?: string | null
+  workflow_summary?: string | null
+  clarification_needed?: boolean | null
+  compare_result?: Record<string, unknown> | null
+  planner_meta?: Record<string, unknown> | null
 }
 
 export interface CreateSessionResponse {
@@ -239,4 +255,3 @@ export async function deleteSessionApi(sessionId: number): Promise<{ message: st
   }
   return response.json()
 }
-

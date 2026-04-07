@@ -84,6 +84,12 @@ class RetrievalMetaPayload(BaseModel):
     compare_result: dict[str, Any] | None = None
     clarification_needed: bool | None = None
     workflow_summary: str | None = None
+    source_count: int | None = None
+    dominant_source_ratio: float | None = None
+    multi_source_coverage: float | None = None
+    fallback_triggered: bool | None = None
+    retrieval_rounds: int | None = None
+    stop_reason: str | None = None
 
 
 class AskSuccessResponse(BaseModel):
