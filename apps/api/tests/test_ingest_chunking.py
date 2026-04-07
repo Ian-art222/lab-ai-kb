@@ -38,6 +38,13 @@ class TestIngestChunking(unittest.TestCase):
         self.assertEqual(limited[0]["section_title"], "章节一")
         self.assertEqual(limited[0]["block_type"], "table")
 
+    def test_markdown_sections_include_traceable_metadata(self):
+        md = "# 总览\n\n内容段"
+        sections = _split_markdown_sections(md)
+        self.assertEqual(sections[0]["section_path"], ["总览"])
+        self.assertEqual(sections[0]["parent_section"], "总览")
+        self.assertEqual(sections[0]["source_type"], "markdown")
+
 
 if __name__ == "__main__":
     unittest.main()

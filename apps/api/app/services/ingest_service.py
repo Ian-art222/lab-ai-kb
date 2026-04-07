@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,8 @@ def _extract_text(file_record: FileRecord, file_path: Path) -> str:
     file_type = (file_record.file_type or "").lower()
 
     if file_type in {"txt", "md"}:
+        return file_path.read_text(encoding="utf-8")
+    if file_type in {"csv", "tsv"}:
         return file_path.read_text(encoding="utf-8")
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
@@ -79,6 +82,9 @@ def _split_markdown_sections(text: str) -> list[dict]:
                 "section_title": current_title,
                 "heading_level": current_heading_level,
                 "block_type": block_type,
+                "section_path": [current_title] if current_title else [],
+                "parent_section": current_title,
+                "source_type": "markdown",
             }
         )
 
@@ -121,6 +127,9 @@ def _split_paragraph_segments(
                 "page_number": page_number,
                 "section_title": section_title or _guess_section_title(content),
                 "block_type": "table" if _looks_like_text_table(content) else block_type,
+                "section_path": [section_title] if section_title else [],
+                "parent_section": section_title,
+                "source_type": "paragraph",
             }
         )
     return segments
@@ -147,6 +156,21 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
             if md_segments:
                 return md_segments
         return _split_paragraph_segments(text, page_number=None)
+    if file_type in {"csv", "tsv"}:
+        text = file_path.read_text(encoding="utf-8")
+        rows = [line.strip() for line in text.splitlines() if line.strip()]
+        return [
+            {
+                "text": row,
+                "page_number": None,
+                "section_title": "tabular_rows",
+                "block_type": "table",
+                "section_path": ["tabular_rows"],
+                "parent_section": "tabular_rows",
+                "source_type": file_type,
+            }
+            for row in rows
+        ]
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
         segments: list[dict] = []
@@ -186,6 +210,9 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
                     "page_number": None,
                     "section_title": current_heading or _guess_section_title(text),
                     "block_type": "paragraph",
+                    "section_path": [current_heading] if current_heading else [],
+                    "parent_section": current_heading,
+                    "source_type": "docx",
                 }
             )
         return segments
@@ -221,6 +248,9 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
                     "section_title": segment.get("section_title"),
                     "block_type": segment.get("block_type"),
                     "heading_level": segment.get("heading_level"),
+                    "section_path": segment.get("section_path"),
+                    "parent_section": segment.get("parent_section"),
+                    "source_type": segment.get("source_type"),
                 }
             )
             truncated = True
@@ -232,6 +262,9 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
                 "section_title": segment.get("section_title"),
                 "block_type": segment.get("block_type"),
                 "heading_level": segment.get("heading_level"),
+                "section_path": segment.get("section_path"),
+                "parent_section": segment.get("parent_section"),
+                "source_type": segment.get("source_type"),
             }
         )
         total += len(content)
@@ -410,13 +443,26 @@ def ingest_file_job(
             page_no = segment.get("page_number")
             section_guess = segment.get("section_title") or _guess_section_title(seg_text)
             block_type = segment.get("block_type") or "paragraph"
+            section_path = segment.get("section_path") or ([section_guess] if section_guess else [])
+            source_type = segment.get("source_type") or (file_record.file_type or "").lower() or "text"
+            parent_section = segment.get("parent_section") or section_guess
+            seg_hash = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
             parent_meta = {
+                "doc_id": file_record.id,
+                "file_id": file_record.id,
+                "filename": file_record.file_name,
                 "source_file_name": file_record.file_name,
                 "page_number": page_no,
+                "page_range": [page_no, page_no] if page_no is not None else None,
                 "section_title": section_guess,
+                "section_path": section_path,
+                "parent_section": parent_section,
                 "segment_order": seg_idx,
                 "chunk_role": "parent",
                 "block_type": block_type,
+                "source_type": source_type,
+                "content_hash": seg_hash,
+                "pipeline_version": "v2_phase1",
             }
             parent_row_index = len(rows_spec)
             rows_spec.append(
@@ -438,14 +484,25 @@ def ingest_file_job(
             )
             for ci, ch in enumerate(segment_chunks or []):
                 child_meta = {
+                    "doc_id": file_record.id,
+                    "file_id": file_record.id,
+                    "filename": file_record.file_name,
                     "source_file_name": file_record.file_name,
                     "page_number": ch.get("page_number"),
+                    "page_range": [ch.get("page_number"), ch.get("page_number")]
+                    if ch.get("page_number") is not None
+                    else None,
                     "section_title": ch.get("section_title"),
+                    "section_path": section_path,
+                    "parent_section": parent_section,
                     "segment_order": seg_idx,
                     "child_index_in_segment": ci,
                     "chunk_role": "child",
                     "parent_row_index": parent_row_index,
                     "block_type": ch.get("block_type") or block_type,
+                    "source_type": source_type,
+                    "content_hash": hashlib.sha256(ch["content"].encode("utf-8")).hexdigest(),
+                    "pipeline_version": "v2_phase1",
                 }
                 rows_spec.append(
                     {
