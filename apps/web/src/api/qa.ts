@@ -51,6 +51,7 @@ export interface RetrievalMeta {
   parent_recovered_chunks?: number | null
   parent_deduped_groups?: number | null
   task_type?: string | null
+  selected_scope?: string | null
   selected_skill?: string | null
   workflow_summary?: string | null
   fallback_triggered?: boolean | null

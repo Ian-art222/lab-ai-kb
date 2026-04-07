@@ -1,193 +1,163 @@
 # Lab AI KB
 
-Lab AI KB 是一个面向团队内部的私有化**文本型 RAG**知识库系统，技术栈为 **FastAPI + PostgreSQL + pgvector + Vue 3 + Element Plus**。
+Lab AI KB 是一个私有化文本知识库系统（FastAPI + PostgreSQL/pgvector + Vue 3），提供文件管理、索引、RAG 问答与管理员诊断能力。
 
-> 当前定位：工程可运行、可部署、可回归的文本知识库问答系统；不是多模态平台。
-
----
-
-## 1. 项目简介
-
-本项目用于管理文档、建立索引并进行基于文档证据的问答。后端负责文件管理、索引和问答链路，前端提供文件中心、问答界面、用户与系统配置页面。
-
-当前已经覆盖：
-- 文件管理（目录树、上传、下载、移动、删除、详情）
-- 文件索引（建立索引、重建索引、索引状态追踪）
-- RAG 问答（scope 控制、strict/non-strict、引用返回）
-- 多 Provider 配置（聊天模型与检索 embedding 分离）
-- 评测脚本与 source diversity 回归样例
+> 本 README 已按 **2026-04-07 仓库代码与本轮审查结果**更新，重点强调“已验证项 / 未验证项”。
 
 ---
 
-## 2. 当前能力概览
+## 1. 当前能力（按代码现状）
 
-### 文件能力
-- 支持文件类型：`txt` / `md` / `pdf`（文本型 PDF）/ `docx` / `csv` / `tsv`
-- 支持单文件上传与单文件下载
-- 支持批量上传（前端逐文件上传）
-- 支持批量下载（后端打包 ZIP）
-- 前端提供上传/下载进度条与百分比显示
-
-### RAG 能力
-- 检索模式：`semantic` / `lexical` / `hybrid`
-- pgvector 检索 + 失败回退
-- rerank（可开关）
-- strict / non-strict 回答策略
-- source diversity control（相关性优先，不强制多来源）
-- 证据分组（primary/supplementary sources）与可追溯 chunk 元数据
-- retrieval meta 增强（normalized query / rewritten queries / abstain reason）
-
-### 平台能力
-- JWT 登录鉴权
-- 用户与角色管理
-- 系统设置（provider/model/retrieval 参数）
-- 首页运行状态与近期记录
+- 认证与权限：JWT 登录；用户角色区分 `admin/member`；管理员诊断接口强制 `admin` 才可访问。
+- 文件中心：目录树、上传、下载、删除、移动、详情。
+- 索引链路：单文件建索引、重建索引（force reindex）、索引状态查询。
+- QA 主链路：`POST /api/qa/ask`，支持 scope（all/folder/files）、strict/non-strict、引用返回。
+- Agent/RAG 元信息：`task_type`、`selected_skill`、`selected_scope`、`planner_meta`、`compare_result`、`clarification_needed`、`workflow_summary` 等字段。
+- diagnostics：trace 列表、详情、导出、reason stats、retry-index。
+- 评测脚本：`scripts/eval_rag.py`（对比 rerank off/on）。
 
 ---
 
-## 3. 边界与不支持项
-
-本仓库当前只做文本型 RAG，明确不做：
-- 多模态问答
-- OCR
-- 图片理解
-- 表格图片识别
-- 音视频解析
-- 视觉模型推理
-
-如上传扫描版 PDF，系统不会执行 OCR。
-
----
-
-## 4. 目录结构
+## 2. 项目结构
 
 ```text
 apps/
-  api/      # FastAPI 后端
-  web/      # Vue 3 + Element Plus 前端
-docs/
-  deployment.md
-  troubleshooting.md
-  eval_rag.md
+  api/                 # FastAPI + SQLAlchemy + Alembic
+  web/                 # Vue3 + Vite + Element Plus
+docs/                  # 部署、排障、阶段文档
+evals/                 # eval 数据与报告
+docker-compose.yml     # 最小可运行栈（db + api + web）
 ```
-
-常用路径：
-- 后端环境变量示例：`apps/api/.env.example`
-- 前端环境变量示例：`apps/web/.env.example`
-- 评测样例：
-  - `apps/api/evals/source_diversity_eval.sample.jsonl`
-  - `apps/api/evals/source_diversity_regression.sample.jsonl`
 
 ---
 
-## 5. 快速开始
+## 3. 开发环境要求
 
-## 5.1 后端启动
+- Python 3.10+
+- Node.js 20+（建议 22）
+- PostgreSQL 16 + pgvector（本地或 Docker）
+
+---
+
+## 4. 本地开发启动（推荐）
+
+### 4.1 API
 
 ```bash
 cd apps/api
 python -m venv .venv
-# Windows
-.venv\Scripts\pip install -r requirements.txt
-# Linux/macOS
-# source .venv/bin/activate && pip install -r requirements.txt
+source .venv/bin/activate  # Windows 用 .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env       # Windows 用 copy
 
-# 准备配置
-copy .env.example .env
-
-# 执行迁移
-.venv\Scripts\alembic upgrade head
+# 确保 DATABASE_URL 指向可用 PostgreSQL（需 pgvector）
+alembic upgrade head
 
 # 创建管理员
-.venv\Scripts\python scripts\create_admin.py admin your-password
+python scripts/create_admin.py admin 'your-password'
 
-# 启动
-.venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 启动 API
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-## 5.2 前端启动
+### 4.2 Web
 
 ```bash
 cd apps/web
 npm install
-copy .env.example .env
+cp .env.example .env
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-本地默认通过 Vite 代理访问后端：`/api -> http://127.0.0.1:8000`。
+默认开发代理：`/api -> http://127.0.0.1:8000`。
 
 ---
 
-## 6. 环境变量与关键配置
+## 5. Docker Compose 启动
 
-### 6.1 后端环境变量
+### 5.1 首次准备
 
-后端读取 `apps/api/.env`，关键项：
-- `DATABASE_URL`
-- `JWT_SECRET_KEY`
-- `UPLOAD_DIR`
-- `LLM_*`（聊天）
-- `EMBEDDING_*`（检索 embedding）
-- `EMBED_BATCH_SIZE` / `EMBED_RETRY_TIMES` / `EMBED_BATCH_DELAY`
-- `QA_*`（检索、阈值、rerank、source diversity）
+```bash
+cp .env.example .env
+cp apps/api/.env.example apps/api/.env
+```
 
-### 6.2 前端环境变量
+> `apps/api/.env` 中的 `DATABASE_URL` 会被 compose 的 `api.environment.DATABASE_URL` 覆盖为容器内地址（`db:5432`）。
 
-`apps/web/.env`：
-- `VITE_API_BASE_URL=`
+### 5.2 启动
 
-本地开发建议留空，优先使用 Vite 代理。
+```bash
+docker compose up -d --build
+```
 
----
+服务默认端口：
+- Web: `http://127.0.0.1:8080`
+- API: `http://127.0.0.1:8000`
+- DB: `127.0.0.1:5432`
 
-## 7. RAG 能力说明
+### 5.3 健康检查
 
-### 7.1 聊天模型与检索 embedding 分离
-
-- `llm_*`：控制回答生成
-- `embedding_*`：控制索引与检索向量空间
-
-**重要**：上线后不应随意切换 `embedding_provider` / `embedding_model`。若切换，需要重建旧索引。
-
-### 7.2 Source Diversity Control
-
-目标：减少“同一文档多个相邻 chunk 霸榜”问题，同时保持相关性优先。
-
-核心策略：
-- per-doc cap
-- dominance guardrail
-- adjacent redundancy suppression
-- diversity rerank（可选）
-- doc-aware selection
-
-关键参数可在 `apps/api/app/core/config.py` 查阅（`QA_MAX_CHUNKS_PER_DOC`、`QA_DIVERSITY_RERANK_ENABLED`、`QA_SINGLE_DOC_DOMINANCE_RATIO` 等）。
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8080/health
+```
 
 ---
 
-## 8. Provider / 模型接入说明
-
-当前项目支持在系统设置页配置多 Provider（含 openai-compatible、gemini、qwen 等路径）。
-
-推荐预上线默认组合（见 `docs/deployment.md`）：
-- Chat: `gemini / gemini-2.5-flash`
-- Retrieval embedding: `qwen / text-embedding-v4`
-
-原则：
-- 聊天模型可按业务切换
-- 检索 embedding 标准应固定
-
----
-
-## 9. 验证与回归（smoke / eval）
-
-### 9.1 Smoke Check
+## 6. 数据库迁移（Alembic）
 
 ```bash
 cd apps/api
-.venv\Scripts\python scripts\smoke_check.py
+alembic upgrade head
+alembic current
 ```
 
-### 9.2 Phase 2.5 管理员诊断 Smoke / Acceptance
+---
+
+## 7. 创建管理员
+
+```bash
+cd apps/api
+python scripts/create_admin.py <username> '<password>'
+```
+
+---
+
+## 8. 测试与检查
+
+### 8.1 后端测试
+
+```bash
+cd apps/api
+pytest -q
+```
+
+### 8.2 前端类型检查
+
+```bash
+cd apps/web
+npm run type-check
+```
+
+### 8.3 前端单测
+
+```bash
+cd apps/web
+npm run test:unit
+```
+
+---
+
+## 9. smoke / acceptance
+
+### 9.1 基础 smoke
+
+```bash
+cd apps/api
+python scripts/smoke_check.py
+```
+
+### 9.2 管理员 diagnostics smoke
 
 ```bash
 cd apps/api
@@ -199,56 +169,58 @@ python scripts/smoke_phase25_admin_diagnostics.py \
   --member-pass <member_pass>
 ```
 
-说明：
-- 会校验 admin diagnostics（列表/详情/retry/export/stats）链路。
-- 会校验 member 访问 admin diagnostics 接口返回 403。
-- 依赖 PostgreSQL、API、账号、索引与 QA 环境可用；未启动依赖时会明确失败退出。
-- 详细流程见 `docs/phase25_admin_diagnostics_and_smoke.md`。
+---
 
-### 9.3 RAG 评测
+## 10. 运行 evals
 
 ```bash
 cd apps/api
-python scripts/eval_rag.py --input evals/source_diversity_eval.sample.jsonl --output scripts/eval_source_diversity_report.json
+python scripts/eval_rag.py \
+  --input evals/source_diversity_eval.sample.jsonl \
+  --output /tmp/eval_report.json
 ```
 
-说明：
-- 样例文件是模板，不包含真实业务数据。
-- 无真实已索引数据时，不应伪造 baseline/optimized 数值结论。
-- 详细说明见 `docs/eval_rag.md`。
+说明：样例集通常只验证链路，不代表真实线上效果。
 
 ---
 
-## 10. 部署 / 排障入口
+## 11. diagnostics / 管理员能力
 
-- 部署文档：`docs/deployment.md`
-- 排障文档：`docs/troubleshooting.md`
+前端页面：`/admin/diagnostics`
 
-常见问题优先检查：
-1. 后端是否可访问 `http://127.0.0.1:8000/docs`
-2. Alembic 是否已迁移到 head
-3. 前端是否误配置了 `VITE_API_BASE_URL`
-4. 当前索引标准是否与已索引文件一致
+后端接口：
+- `GET /api/admin/diagnostics/traces`
+- `GET /api/admin/diagnostics/traces/{trace_id}`
+- `GET /api/admin/diagnostics/traces/{trace_id}/export`
+- `GET /api/admin/diagnostics/traces/stats/reasons`
+- `POST /api/admin/diagnostics/files/{file_id}/retry-index`
+
+member 角色访问上述接口应返回 403（由 `require_admin` 控制）。
 
 ---
 
-## 11. 适用场景与限制
+## 12. 已验证项（本轮）
 
-适用场景：
-- 团队内部知识文档检索问答
-- 中小规模文本资料归档与证据化问答
-- 需要本地部署、可控配置和可回归验证的场景
+- 后端测试：`27 passed`。
+- `POST /api/qa/ask` 相关 schema 与测试中的关键字段（`references_json` / `evidence_bundles` / agent 元字段）在后端代码中可达。
+- diagnostics admin 路由与前端 API 路径一致。
+- `scripts/eval_rag.py` 可执行（样例数据下可生成报告）。
+- 修复了前端 `RetrievalMeta` 缺少 `selected_scope` 的类型错误，`npm run type-check` 通过。
 
-当前限制：
-- 非文本内容能力有限（不做 OCR/多模态）
-- 下载进度百分比依赖浏览器对 `Content-Length` 的可计算性
-- 评测结论依赖真实索引数据，不可仅凭样例模板得出线上质量结论
+---
 
+## 13. 未验证项 / 限制
 
-## 12. Docker Compose（单机部署）
+- 未在本环境完成端到端 UI 手工回归（无浏览器自动化工具）。
+- 未完成真实容器启动验证（本轮主要做配置与静态一致性修复，未实际执行 `docker compose up` 全链路验收）。
+- `smoke_check.py` 依赖正在运行的 API/DB；若服务未启动会连接失败。
+- 前端 `npm run test:unit` 受 npm registry 403 限制（依赖未能完整安装）。
 
-仓库已提供可直接部署的 `web + api + db` Compose 方案：
+---
 
-- 启动文档见 `docs/deployment.md` 的“Docker Compose 部署（单机 2 CPU / 4GB）”章节
-- 实验室内网访问地址为 `http://10.65.218.208:8080`
-- LLM / embedding 仍通过外部 Provider API，不在本机推理
+## 14. 相关文档
+
+- `docs/deployment.md`
+- `docs/troubleshooting.md`
+- `docs/eval_rag.md`
+- `docs/phase25_admin_diagnostics_and_smoke.md`
