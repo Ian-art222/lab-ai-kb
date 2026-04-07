@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -50,23 +51,119 @@ def _extract_text(file_record: FileRecord, file_path: Path) -> str:
     raise ValueError(f"暂不支持该文件类型索引：{file_type or 'unknown'}")
 
 
+def _normalize_pdf_text(raw: str) -> str:
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"-\n(?=\w)", "", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _split_markdown_sections(text: str) -> list[dict]:
+    lines = text.splitlines()
+    sections: list[dict] = []
+    current_title: str | None = None
+    buf: list[str] = []
+    in_code = False
+
+    def flush() -> None:
+        body = "\n".join(buf).strip()
+        if not body:
+            return
+        block_type = "code" if body.startswith("```") else "paragraph"
+        sections.append(
+            {
+                "text": body,
+                "page_number": None,
+                "section_title": current_title,
+                "block_type": block_type,
+            }
+        )
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            buf.append(line)
+            continue
+        if not in_code and stripped.startswith("#"):
+            flush()
+            buf = []
+            current_title = stripped.lstrip("#").strip() or current_title
+            continue
+        buf.append(line)
+    flush()
+    return sections
+
+
+def _split_paragraph_segments(
+    text: str,
+    *,
+    page_number: int | None,
+    section_title: str | None = None,
+) -> list[dict]:
+    segments: list[dict] = []
+    blocks = re.split(r"\n\s*\n", text.strip())
+    for block in blocks:
+        content = block.strip()
+        if not content:
+            continue
+        block_type = "list" if re.match(r"^([-*]|\d+\.)\s+", content) else "paragraph"
+        segments.append(
+            {
+                "text": content,
+                "page_number": page_number,
+                "section_title": section_title or _guess_section_title(content),
+                "block_type": block_type,
+            }
+        )
+    return segments
+
+
 def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
     file_type = (file_record.file_type or "").lower()
 
     if file_type in {"txt", "md"}:
-        return [{"text": file_path.read_text(encoding="utf-8"), "page_number": None}]
+        text = file_path.read_text(encoding="utf-8")
+        if file_type == "md":
+            md_segments = _split_markdown_sections(text)
+            if md_segments:
+                return md_segments
+        return _split_paragraph_segments(text, page_number=None)
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
         segments: list[dict] = []
         for index, page in enumerate(reader.pages):
-            page_text = (page.extract_text() or "").strip()
+            page_text = _normalize_pdf_text(page.extract_text() or "")
             if page_text:
-                segments.append({"text": page_text, "page_number": index + 1})
+                segments.extend(
+                    _split_paragraph_segments(
+                        page_text,
+                        page_number=index + 1,
+                    )
+                )
         return segments
     if file_type == "docx":
         document = Document(str(file_path))
-        paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-        return [{"text": "\n".join(paragraphs), "page_number": None}]
+        segments: list[dict] = []
+        current_heading: str | None = None
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            style_name = (getattr(paragraph.style, "name", "") or "").lower()
+            if style_name.startswith("heading"):
+                current_heading = text
+                continue
+            segments.append(
+                {
+                    "text": text,
+                    "page_number": None,
+                    "section_title": current_heading or _guess_section_title(text),
+                    "block_type": "paragraph",
+                }
+            )
+        return segments
 
     raise ValueError(f"暂不支持该文件类型索引：{file_type or 'unknown'}")
 
@@ -105,7 +202,13 @@ def _limit_segments(segments: list[dict]) -> tuple[list[dict], bool]:
     return limited, truncated
 
 
-def _chunk_text(text: str, *, page_number: int | None = None) -> tuple[list[dict], str | None]:
+def _chunk_text(
+    text: str,
+    *,
+    page_number: int | None = None,
+    section_title: str | None = None,
+    block_type: str | None = None,
+) -> tuple[list[dict], str | None]:
     normalized = text.strip()
     if not normalized:
         return [], None
@@ -120,28 +223,57 @@ def _chunk_text(text: str, *, page_number: int | None = None) -> tuple[list[dict
                 {
                     "content": normalized,
                     "page_number": page_number,
-                    "section_title": _guess_section_title(normalized),
+                    "section_title": section_title or _guess_section_title(normalized),
+                    "block_type": block_type or "paragraph",
                 }
             ],
             "文本较短，检索效果可能有限",
         )
-    start = 0
-    text_length = len(normalized)
 
-    while start < text_length:
-        end = min(start + CHUNK_SIZE, text_length)
-        chunk = normalized[start:end].strip()
-        if chunk and len(chunk) >= MIN_CHUNK_CHARS:
+    units = [u.strip() for u in re.split(r"\n\s*\n", normalized) if u.strip()]
+    if not units:
+        units = [normalized]
+
+    buf = ""
+    for unit in units:
+        candidate = f"{buf}\n\n{unit}".strip() if buf else unit
+        if len(candidate) <= CHUNK_SIZE:
+            buf = candidate
+            continue
+        if buf:
             chunks.append(
                 {
-                    "content": chunk,
+                    "content": buf,
                     "page_number": page_number,
-                    "section_title": _guess_section_title(chunk),
+                    "section_title": section_title or _guess_section_title(buf),
+                    "block_type": block_type or "paragraph",
                 }
             )
-        if end >= text_length:
-            break
-        start = max(0, end - CHUNK_OVERLAP)
+            overlap = buf[-CHUNK_OVERLAP:] if CHUNK_OVERLAP > 0 else ""
+            buf = f"{overlap}\n{unit}".strip()
+            if len(buf) > CHUNK_SIZE:
+                buf = buf[:CHUNK_SIZE]
+                warning = "存在超长段落，已按长度约束切分"
+        else:
+            chunks.append(
+                {
+                    "content": unit[:CHUNK_SIZE],
+                    "page_number": page_number,
+                    "section_title": section_title or _guess_section_title(unit),
+                    "block_type": block_type or "paragraph",
+                }
+            )
+            warning = "存在超长段落，已按长度约束切分"
+            buf = unit[CHUNK_SIZE - CHUNK_OVERLAP : CHUNK_SIZE].strip()
+    if buf and len(buf) >= MIN_CHUNK_CHARS:
+        chunks.append(
+            {
+                "content": buf,
+                "page_number": page_number,
+                "section_title": section_title or _guess_section_title(buf),
+                "block_type": block_type or "paragraph",
+            }
+        )
 
     return chunks, warning
 
@@ -240,13 +372,15 @@ def ingest_file_job(
             if not seg_text:
                 continue
             page_no = segment.get("page_number")
-            section_guess = _guess_section_title(seg_text)
+            section_guess = segment.get("section_title") or _guess_section_title(seg_text)
+            block_type = segment.get("block_type") or "paragraph"
             parent_meta = {
                 "source_file_name": file_record.file_name,
                 "page_number": page_no,
                 "section_title": section_guess,
                 "segment_order": seg_idx,
                 "chunk_role": "parent",
+                "block_type": block_type,
             }
             parent_row_index = len(rows_spec)
             rows_spec.append(
@@ -263,6 +397,8 @@ def ingest_file_job(
             segment_chunks, segment_warning = _chunk_text(
                 seg_text,
                 page_number=page_no,
+                section_title=section_guess,
+                block_type=block_type,
             )
             for ci, ch in enumerate(segment_chunks or []):
                 child_meta = {
@@ -273,6 +409,7 @@ def ingest_file_job(
                     "child_index_in_segment": ci,
                     "chunk_role": "child",
                     "parent_row_index": parent_row_index,
+                    "block_type": ch.get("block_type") or block_type,
                 }
                 rows_spec.append(
                     {
