@@ -298,7 +298,7 @@ docker compose up -d --build
 
 - `api` 容器启动时会自动等待数据库可用，并执行 `alembic upgrade head`
 - 之后以单进程 `uvicorn` 启动（无多 worker）
-- 默认仅暴露 `web`：`127.0.0.1:8080 -> container:80`
+- 默认将 `web` 绑定到实验室内网地址：`10.65.218.208:8080 -> container:80`
 
 ### 更新部署
 
@@ -362,10 +362,10 @@ docker compose down
 
 ```bash
 # 前端首页
-curl -I http://127.0.0.1:8080
+curl -I http://10.65.218.208:8080
 
 # API 健康检查（通过前端同源反代）
-curl http://127.0.0.1:8080/health
+curl http://10.65.218.208:8080/health
 
 # 直接查看 api 容器健康状态
 docker inspect --format='{{.State.Health.Status}}' lab-ai-kb-api
