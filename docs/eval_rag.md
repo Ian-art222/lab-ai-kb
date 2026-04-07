@@ -60,3 +60,17 @@ QA_REDUNDANCY_SIM_THRESHOLD=0.92
 - `citation_source_diversity_mean`
 - `single_source_when_sufficient_rate`
 - `unsupported_multi_source_rate`
+
+## Phase 3B controlled-agent eval
+
+Run from repository root:
+
+```bash
+python evals/runners/run_phase3_eval.py \
+  --dataset evals/datasets/phase3_agent_eval_sample.jsonl \
+  --out-json evals/reports/phase3b_report.json \
+  --out-md evals/reports/phase3b_report.md \
+  --out-failures evals/reports/phase3b_failures.jsonl
+```
+
+Phase 3B report fields include: `task_type`, `selected_skill`, `selected_scope`, `planner_strategy`, `retrieval_rounds`, `fallback_triggered`, `clarify_triggered`, `source_count`, `dominant_source_ratio`, `multi_source_coverage`, `predicted_answer`, `citations_count`, `abstained`, `reason_code`.

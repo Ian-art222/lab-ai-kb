@@ -41,6 +41,18 @@ def _extract_source_file_ids(selected_evidence: list | None, evidence_bundles: d
     return sorted(file_ids)
 
 
+
+
+def _extract_guardrail_events(tool_traces: list | None) -> list[dict]:
+    events: list[dict] = []
+    for item in tool_traces or []:
+        if not isinstance(item, dict):
+            continue
+        tool = item.get("tool")
+        if tool and "guardrail" in str(tool):
+            events.append(item)
+    return events
+
 def list_traces(
     db: Session,
     *,
@@ -103,6 +115,10 @@ def list_traces(
             "tool_traces": row.tool_traces_json,
             "workflow_steps": row.workflow_steps_json,
             "session_context": row.session_context_json,
+            "selected_scope": (row.debug_json or {}).get("selected_scope") if isinstance(row.debug_json, dict) else None,
+            "selected_skill": (row.debug_json or {}).get("selected_skill") if isinstance(row.debug_json, dict) else None,
+            "planner_meta": (row.debug_json or {}).get("planner_meta") if isinstance(row.debug_json, dict) else None,
+            "guardrail_events": _extract_guardrail_events(row.tool_traces_json),
             "created_at": row.created_at,
             "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),
         }
@@ -139,6 +155,10 @@ def get_trace_detail(db: Session, *, trace_id: str) -> dict:
         "tool_traces": row.tool_traces_json,
         "workflow_steps": row.workflow_steps_json,
         "session_context": row.session_context_json,
+        "selected_scope": (row.debug_json or {}).get("selected_scope") if isinstance(row.debug_json, dict) else None,
+        "selected_skill": (row.debug_json or {}).get("selected_skill") if isinstance(row.debug_json, dict) else None,
+        "planner_meta": (row.debug_json or {}).get("planner_meta") if isinstance(row.debug_json, dict) else None,
+        "guardrail_events": _extract_guardrail_events(row.tool_traces_json),
         "debug_json": row.debug_json,
         "created_at": row.created_at,
         "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),

@@ -78,6 +78,12 @@ class RetrievalMetaPayload(BaseModel):
     tool_traces_json: list[dict[str, Any]] | None = None
     session_context_json: dict[str, Any] | None = None
     final_answer_type: str | None = None
+    selected_scope: str | None = None
+    selected_skill: str | None = None
+    planner_meta: dict[str, Any] | None = None
+    compare_result: dict[str, Any] | None = None
+    clarification_needed: bool | None = None
+    workflow_summary: str | None = None
 
 
 class AskSuccessResponse(BaseModel):
@@ -92,6 +98,12 @@ class AskSuccessResponse(BaseModel):
     answer_source: str
     used_files: list[int]
     retrieval_meta: RetrievalMetaPayload
+    task_type: str | None = None
+    selected_skill: str | None = None
+    planner_meta: dict[str, Any] | None = None
+    compare_result: dict[str, Any] | None = None
+    clarification_needed: bool | None = None
+    workflow_summary: str | None = None
 
 
 class QAMessageItem(BaseModel):

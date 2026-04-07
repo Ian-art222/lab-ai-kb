@@ -12,7 +12,7 @@ from app.services.qa_service import (
     _normalize_retrieval_mode,
     _score_threshold_for_mode,
 )
-from app.services.qa_agent_workflow import classify_task_type, plan_retrieval
+from app.services.qa_agent_workflow import classify_task_type, plan_retrieval, route_task_scope_skill
 
 
 class TestQARetrievalLogic(unittest.TestCase):
@@ -95,8 +95,29 @@ class TestQARetrievalLogic(unittest.TestCase):
             candidate_k=4,
             file_ids=[1, 2],
         )
-        self.assertEqual(plan["selected_strategy"], "compare_dual_focus")
+        self.assertEqual(plan["selected_strategy"], "side_by_side_compare_retrieval")
         self.assertGreaterEqual(plan["top_k"], 6)
+        self.assertTrue(plan["fallback_enabled"])
+        self.assertIn("candidate_plan", plan)
+
+
+    def test_task_scope_skill_router(self):
+        routed = route_task_scope_skill(
+            question="请比较A和B在成本上的差异",
+            scope_type="all",
+            file_ids=None,
+        )
+        self.assertEqual(routed["task_type"], "compare")
+        self.assertEqual(routed["selected_skill"], "compare_skill")
+        self.assertGreaterEqual(len(routed["compare_targets"]), 2)
+
+        clarify = route_task_scope_skill(
+            question="请比较一下",
+            scope_type="all",
+            file_ids=None,
+        )
+        self.assertEqual(clarify["task_type"], "clarification_needed")
+        self.assertTrue(clarify["clarification_needed"])
 
     def test_grounded_answer_guard(self):
         self.assertFalse(_is_grounded_answer("", [{"chunk_id": 1}]))

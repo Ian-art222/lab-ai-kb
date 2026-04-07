@@ -19,14 +19,17 @@ from app.models.system_setting import SystemSetting
 from app.services.failure_cases import build_failure_case, sink_failure_case
 from app.services.model_service import chat_completion, embed_texts
 from app.services.qa_agent_workflow import (
+    TASK_ABSTAIN,
+    TASK_CLARIFICATION_NEEDED,
+    TASK_COLLECTION_SCOPED_QA,
     TASK_COMPARE,
     TASK_MULTI_DOC_SYNTHESIS,
     build_session_context,
-    classify_task_type,
-    extract_compare_targets,
     plan_retrieval,
+    route_task_scope_skill,
     summarize_tool_trace,
 )
+from app.services.qa_guardrails import apply_evidence_guardrail, apply_input_guardrail, apply_output_guardrail
 from app.services.reason_codes import QAReasonCode, normalize_reason_code
 from app.services.settings_service import build_embedding_index_standard
 
@@ -148,6 +151,12 @@ def _build_retrieval_meta(
     tool_traces_json: list | None = None,
     session_context_json: dict | None = None,
     final_answer_type: str | None = None,
+    selected_scope: str | None = None,
+    selected_skill: str | None = None,
+    planner_meta: dict | None = None,
+    compare_result: dict | None = None,
+    clarification_needed: bool | None = None,
+    workflow_summary: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -205,6 +214,12 @@ def _build_retrieval_meta(
         "tool_traces_json": tool_traces_json or [],
         "session_context_json": session_context_json or {},
         "final_answer_type": final_answer_type,
+        "selected_scope": selected_scope,
+        "selected_skill": selected_skill,
+        "planner_meta": planner_meta or {},
+        "compare_result": compare_result,
+        "clarification_needed": clarification_needed,
+        "workflow_summary": workflow_summary,
     }
 
 
@@ -1446,9 +1461,12 @@ def ask_question(
     normalized_query = " ".join((question or "").split()).strip()
     trace_id = uuid.uuid4().hex
     request_id = uuid.uuid4().hex
-    routing = classify_task_type(question=question, scope_type=scope_type, file_ids=file_ids)
+    input_guardrail = apply_input_guardrail(question)
+    routing = route_task_scope_skill(question=question, scope_type=scope_type, file_ids=file_ids)
     task_type = routing["task_type"]
-    compare_targets = extract_compare_targets(question) if task_type == TASK_COMPARE else []
+    selected_scope = routing.get("selected_scope", scope_type)
+    selected_skill = routing.get("selected_skill")
+    compare_targets = routing.get("compare_targets") or []
     planned = plan_retrieval(
         task_type=task_type,
         normalized_query=normalized_query,
@@ -1458,13 +1476,16 @@ def ask_question(
         top_k=top_k,
         candidate_k=candidate_k,
         file_ids=file_ids,
+        selected_scope=selected_scope,
+        selected_skill=selected_skill,
     )
     query_variants = planned.get("rewritten_queries") or [normalized_query]
     top_k = max(MIN_TOP_K, min(int(planned.get("top_k", top_k)), MAX_TOP_K))
     candidate_k = max(1, int(planned.get("candidate_k", candidate_k)))
     workflow_steps = list(planned.get("workflow_steps") or [])
     tool_traces = [
-        summarize_tool_trace("classify_task_type", routing),
+        summarize_tool_trace("route_task_scope_skill", routing),
+        summarize_tool_trace("input_guardrail", input_guardrail),
         summarize_tool_trace(
             "plan_retrieval",
             {
@@ -1473,6 +1494,7 @@ def ask_question(
                 "candidate_k": candidate_k,
                 "rewritten_queries": query_variants,
                 "scopes": planned.get("scopes"),
+                "candidate_plan": planned.get("candidate_plan"),
             },
         ),
     ]
@@ -1482,7 +1504,74 @@ def ask_question(
         task_type=task_type,
         compare_targets=compare_targets,
         normalized_query=normalized_query,
+        selected_scope=selected_scope,
+        selected_skill=selected_skill,
+        planner_summary={"strategy": planned.get("selected_strategy"), "queries": query_variants},
     )
+    if task_type == TASK_CLARIFICATION_NEEDED:
+        clarification_text = "当前问题需要先澄清比较对象或范围。请在下一条消息明确：比较对象A/B，或指定文件/目录范围。"
+        workflow_steps.append({"step": "clarify_skill_triggered", "status": "completed"})
+        tool_traces.append(summarize_tool_trace("clarify_skill", {"triggered": True, "reason": routing.get("task_reason")}))
+        retrieval_meta = _build_retrieval_meta(
+            retrieval_strategy=DEFAULT_RETRIEVAL_STRATEGY,
+            answer_source="knowledge_base_low_confidence",
+            scope_type=scope_type,
+            strict_mode=strict_mode,
+            top_k=top_k,
+            compatible_file_count=0,
+            candidate_chunks=0,
+            matched_chunks=0,
+            selected_chunks=0,
+            used_file_ids=[],
+            candidate_k=candidate_k,
+            expanded_chunks=0,
+            packed_chunks=0,
+            context_chars=0,
+            neighbor_window=neighbor_window,
+            dedupe_adjacent_chunks=dedupe_adjacent,
+            retrieval_mode=retrieval_mode,
+            semantic_candidate_count=0,
+            lexical_candidate_count=0,
+            fusion_method="none",
+            score_threshold_applied=MIN_SIMILARITY_SCORE,
+            rerank_enabled=eff_rerank_enabled,
+            rerank_input_count=0,
+            rerank_output_count=0,
+            rerank_model_name=app_settings.qa_rerank_model_name,
+            rerank_applied=False,
+            normalized_query=normalized_query,
+            rewritten_queries=query_variants,
+            abstain_reason="问题需要澄清后再检索",
+            abstain_reason_code=QAReasonCode.INSUFFICIENT_EVIDENCE.value,
+            trace_id=trace_id,
+            request_id=request_id,
+            task_type=task_type,
+            planner_output=planned,
+            selected_strategy=planned.get("selected_strategy"),
+            workflow_steps_json=workflow_steps,
+            tool_traces_json=tool_traces,
+            session_context_json=session_context,
+            final_answer_type="clarification_needed",
+            selected_scope=selected_scope,
+            selected_skill=selected_skill,
+            clarification_needed=True,
+            workflow_summary="clarify_before_retrieval",
+        )
+        return {
+            "answer": clarification_text,
+            "references": [],
+            "references_json": {"answer_source": "knowledge_base_low_confidence", "references": []},
+            "evidence_bundles": None,
+            "answer_source": "knowledge_base_low_confidence",
+            "used_files": [],
+            "retrieval_meta": retrieval_meta,
+            "task_type": task_type,
+            "selected_skill": selected_skill,
+            "planner_meta": planned,
+            "compare_result": None,
+            "clarification_needed": True,
+            "workflow_summary": "clarify_before_retrieval",
+        }
     try:
         query_embeddings = embed_texts(
             provider=settings.embedding_provider,
@@ -1568,6 +1657,11 @@ def ask_question(
             tool_traces_json=tool_traces,
             session_context_json=session_context,
             final_answer_type="model_general",
+            selected_scope=selected_scope,
+            selected_skill=selected_skill,
+            planner_meta=planned,
+            clarification_needed=False,
+            workflow_summary="abstain_or_general_fallback",
         )
         return {
             "answer": answer,
@@ -1628,6 +1722,58 @@ def ask_question(
     candidate_matches = _truncate_ranked_to_candidate_k(matches, candidate_k)
     score_threshold_applied = _score_threshold_for_mode(retrieval_mode)
     reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
+    retrieval_rounds = 1
+    fallback_triggered = False
+    if not reliable_matches and bool(planned.get("fallback_enabled")):
+        fallback_triggered = True
+        retrieval_rounds = 2
+        fallback_plan = (planned.get("candidate_plan") or [{}, {}])[1]
+        fallback_queries = fallback_plan.get("queries") or query_variants[:1]
+        try:
+            fallback_embeddings = embed_texts(
+                provider=settings.embedding_provider,
+                api_base=settings.embedding_api_base,
+                api_key=settings.embedding_api_key,
+                model=settings.embedding_model,
+                inputs=fallback_queries,
+                embedding_batch_size_from_db=settings.embedding_batch_size,
+            )
+        except RuntimeError:
+            fallback_embeddings = []
+        if fallback_embeddings:
+            fb_semantic, _ = _semantic_retrieval(
+                db,
+                query_embeddings=fallback_embeddings,
+                compatible_file_ids=compatible_file_ids,
+                top_k=min(pool_limit + 2, QA_RETRIEVAL_POOL_CAP),
+            )
+            fb_lexical = _lexical_retrieval(
+                db,
+                questions=fallback_queries,
+                compatible_file_ids=compatible_file_ids,
+                top_k=min(pool_limit + 2, QA_RETRIEVAL_POOL_CAP),
+            )
+            fallback_matches = _fuse_retrieval_results(fb_semantic, fb_lexical)
+            fallback_matches, _ = _rerank_matches(
+                fallback_matches,
+                question=question,
+                rerank_enabled=eff_rerank_enabled,
+                rerank_top_n=eff_rerank_top_n,
+                rerank_model_name=app_settings.qa_rerank_model_name,
+            )
+            if fallback_matches:
+                candidate_matches = _truncate_ranked_to_candidate_k(fallback_matches, candidate_k)
+                reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
+                tool_traces.append(
+                    summarize_tool_trace(
+                        "retrieval_fallback_round",
+                        {
+                            "triggered": True,
+                            "queries": fallback_queries,
+                            "reliable_matches": len(reliable_matches),
+                        },
+                    )
+                )
     distinct_docs_in_topk = len({_doc_key(item) for item in candidate_matches})
     dominance_guardrail_triggered = _dominance_guardrail(
         reliable_matches,
@@ -1646,7 +1792,15 @@ def ask_question(
     per_doc_selected: dict[int, list[int]] = defaultdict(list)
     for item in selected_reliable_matches:
         per_doc_selected[int(item["chunk"].file_id)].append(int(item["chunk"].chunk_index))
+    source_count = len(per_doc_selected)
+    dominant_source_ratio = (
+        max((len(v) for v in per_doc_selected.values()), default=0) / max(1, len(selected_reliable_matches))
+    )
+    multi_source_coverage = source_count / max(1, min(top_k, 3))
     compatible_count = len(compatible_file_ids)
+    stop_reason = "enough_evidence" if selected_reliable_matches else (
+        "fallback_triggered_but_insufficient" if fallback_triggered else "insufficient_after_round1"
+    )
     logger.info(
         "QA retrieval mode=%s strategy=%s compatible_files=%s semantic=%s lexical=%s fused=%s reliable=%s selected=%s threshold=%.4f rerank=%s diversity=%s unique_docs_before=%s unique_docs_after=%s dominance=%s per_doc=%s",
         retrieval_mode,
@@ -1705,6 +1859,8 @@ def ask_question(
                     "NO_RELIABLE_EVIDENCE",
                     "知识库证据不足，严格模式下无法给出可引用回答。",
                 )
+            evidence_guardrail = apply_evidence_guardrail(references)
+            tool_traces.append(summarize_tool_trace("evidence_guardrail", evidence_guardrail))
             user_prompt = (
                 "你是实验室内部知识库问答助手。你只允许根据下方「资料片段」回答问题。\n"
                 "要求：\n"
@@ -1719,6 +1875,8 @@ def ask_question(
                 "你是一个只依据用户给定的知识库片段作答的助手；无充分依据时不臆测，也不使用课外知识兜底。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            output_guardrail = apply_output_guardrail(answer=answer, references=references, compare_mode=task_type == TASK_COMPARE)
+            tool_traces.append(summarize_tool_trace("output_guardrail", output_guardrail))
             if not _is_grounded_answer(answer, references):
                 logger.info("strict evidence decision=reject reason=grounding_guard")
                 raise QAServiceError(
@@ -1778,6 +1936,21 @@ def ask_question(
                 tool_traces_json=tool_traces,
                 session_context_json=session_context,
                 final_answer_type=("compare" if task_type == TASK_COMPARE else "knowledge_base"),
+                selected_scope=selected_scope,
+                selected_skill=selected_skill,
+                planner_meta={
+                    **planned,
+                    "retrieval_rounds": retrieval_rounds,
+                    "fallback_triggered": fallback_triggered,
+                    "stop_reason": stop_reason,
+                },
+                compare_result=(
+                    {"comparison_targets": compare_targets, "evidence_by_side": {}, "evidence_sufficiency": len(references) >= 2}
+                    if task_type == TASK_COMPARE
+                    else None
+                ),
+                clarification_needed=False,
+                workflow_summary=("compare_skill" if task_type == TASK_COMPARE else selected_skill),
             )
             evidence_bundles = _assemble_evidence_bundles(references)
             return {
@@ -1812,6 +1985,8 @@ def ask_question(
                 redundancy_sim_threshold=redundancy_sim_threshold,
                 redundancy_adjacent_window=redundancy_adjacent_window,
             )
+            evidence_guardrail = apply_evidence_guardrail(references)
+            tool_traces.append(summarize_tool_trace("evidence_guardrail", evidence_guardrail))
             user_prompt = (
                 (
                     "你是实验室知识库问答助手。请做多来源综合并保留引用意识。\n"
@@ -1849,6 +2024,8 @@ def ask_question(
                 "你优先依据用户提供的知识库资料作答；仅在资料边界清晰的前提下可谨慎补充常识，不伪造知识库内容。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            output_guardrail = apply_output_guardrail(answer=answer, references=references, compare_mode=task_type == TASK_COMPARE)
+            tool_traces.append(summarize_tool_trace("output_guardrail", output_guardrail))
             min_citations = max(1, int(app_settings.qa_min_grounded_citations))
             if len(references) < min_citations or not _is_grounded_answer(answer, references):
                 logger.info(
@@ -1911,6 +2088,24 @@ def ask_question(
                     tool_traces_json=tool_traces,
                     session_context_json=session_context,
                     final_answer_type=("compare" if task_type == TASK_COMPARE else "knowledge_base"),
+                    selected_scope=selected_scope,
+                    selected_skill=selected_skill,
+                    planner_meta={
+                        **planned,
+                        "retrieval_rounds": retrieval_rounds,
+                        "fallback_triggered": fallback_triggered,
+                        "stop_reason": stop_reason,
+                        "source_count": source_count,
+                        "dominant_source_ratio": dominant_source_ratio,
+                        "multi_source_coverage": multi_source_coverage,
+                    },
+                    compare_result=(
+                        {"comparison_targets": compare_targets, "evidence_by_side": {}, "evidence_sufficiency": len(references) >= 2}
+                        if task_type == TASK_COMPARE
+                        else None
+                    ),
+                    clarification_needed=False,
+                    workflow_summary=("compare_skill" if task_type == TASK_COMPARE else selected_skill),
                 )
                 evidence_bundles = _assemble_evidence_bundles(references)
                 return {
@@ -1989,6 +2184,19 @@ def ask_question(
             tool_traces_json=tool_traces,
             session_context_json=session_context,
             final_answer_type=answer_src,
+            selected_scope=selected_scope,
+            selected_skill=selected_skill,
+            planner_meta={
+                **planned,
+                "retrieval_rounds": retrieval_rounds,
+                "fallback_triggered": fallback_triggered,
+                "stop_reason": stop_reason,
+                "source_count": source_count,
+                "dominant_source_ratio": dominant_source_ratio,
+                "multi_source_coverage": multi_source_coverage,
+            },
+            clarification_needed=False,
+            workflow_summary="abstain_skill",
         )
         return {
             "answer": answer,

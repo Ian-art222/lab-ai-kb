@@ -100,10 +100,21 @@ def ask_question(
             answer_source=result.get("answer_source"),
         )
         mark_last_qa_status(db, success=True, error_message=None)
+        retrieval_meta = result.get("retrieval_meta") if isinstance(result.get("retrieval_meta"), dict) else {}
         return {
             "session_id": session.id,
             "assistant_message_id": assistant_message.id,
             **result,
+            "task_type": result.get("task_type") or retrieval_meta.get("task_type"),
+            "selected_skill": result.get("selected_skill") or retrieval_meta.get("selected_skill"),
+            "planner_meta": result.get("planner_meta") or retrieval_meta.get("planner_meta"),
+            "compare_result": result.get("compare_result") or retrieval_meta.get("compare_result"),
+            "clarification_needed": (
+                result.get("clarification_needed")
+                if result.get("clarification_needed") is not None
+                else retrieval_meta.get("clarification_needed")
+            ),
+            "workflow_summary": result.get("workflow_summary") or retrieval_meta.get("workflow_summary"),
         }
     except RuntimeError as exc:
         if session is not None:

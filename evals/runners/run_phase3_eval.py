@@ -14,13 +14,21 @@ class Phase3EvalResult:
     scenario: str
     query: str
     task_type: str
+    selected_skill: str
+    selected_scope: str
     planner_strategy: str
+    retrieval_rounds: int
+    fallback_triggered: bool
+    clarify_triggered: bool
+    source_count: int
+    dominant_source_ratio: float
+    multi_source_coverage: float
     predicted_answer: str
     citations_count: int
-    multi_source_coverage: float
     abstained: bool
     reason_code: str | None
-    compare_structure_quality: str | None
+    compare_bucketed: bool
+    guardrail_triggered: bool
     passed: bool
     reason: str
 
@@ -30,42 +38,60 @@ def load_jsonl(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8") as fp:
         for line in fp:
             line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
+            if line:
+                rows.append(json.loads(line))
     return rows
 
 
 def evaluate_case(row: dict) -> Phase3EvalResult:
-    expected_task = row.get("expected_task_type", "simple_qa")
-    expected_abstain = bool(row.get("should_abstain", False))
-    cited_sources = max(0, int(row.get("mock_source_count", 1)))
-    citations_count = max(0, int(row.get("mock_citations_count", cited_sources)))
-    coverage = float(min(1.0, cited_sources / max(1, int(row.get("coverage_divisor", 3)))))
-    strategy = row.get("expected_strategy", "light_qa")
-    compare_quality = "ok" if expected_task == "compare" and cited_sources >= 2 else None
-    abstained = expected_abstain
-    reason_code = "no_retrieval_hit" if abstained else None
+    task_type = row.get("expected_task_type", "simple_qa")
+    selected_skill = row.get("expected_skill", "qa_skill")
+    selected_scope = row.get("expected_scope", "default_kb_scope")
+    strategy = row.get("expected_strategy", "single_pass_qa")
+    source_count = max(0, int(row.get("mock_source_count", 1)))
+    citations_count = max(0, int(row.get("mock_citations_count", source_count)))
+    dominant_source_ratio = float(row.get("mock_dominant_source_ratio", 1.0 if source_count <= 1 else 0.6))
+    multi_source_coverage = float(row.get("mock_multi_source_coverage", min(1.0, source_count / 3)))
+    clarify_triggered = bool(row.get("expected_clarify", False))
+    fallback_triggered = bool(row.get("expected_fallback", False))
+    retrieval_rounds = 2 if fallback_triggered else 1
+    abstained = bool(row.get("should_abstain", False))
+    reason_code = row.get("expected_reason_code") or ("insufficient_evidence" if abstained else None)
+    compare_bucketed = bool(row.get("expected_compare_bucketed", task_type == "compare"))
+    guardrail_triggered = bool(row.get("expected_guardrail", False))
+
     passed = True
-    reason = "phase3_rule_pass"
-    if expected_task in {"multi_doc_synthesis", "compare"} and cited_sources < 2:
+    reason = "phase3b_rule_pass"
+    if task_type in {"multi_doc_synthesis", "compare"} and source_count < 2 and not abstained:
         passed = False
         reason = "insufficient_multi_source_coverage"
-    if expected_abstain and not abstained:
+    if clarify_triggered and task_type != "clarification_needed":
         passed = False
-        reason = "abstain_expected_but_missing"
+        reason = "clarify_signal_mismatch"
+    if fallback_triggered and retrieval_rounds < 2:
+        passed = False
+        reason = "fallback_round_missing"
+
     return Phase3EvalResult(
         id=row.get("id", "unknown"),
         scenario=row.get("scenario", "unknown"),
         query=row.get("query", ""),
-        task_type=expected_task,
+        task_type=task_type,
+        selected_skill=selected_skill,
+        selected_scope=selected_scope,
         planner_strategy=strategy,
+        retrieval_rounds=retrieval_rounds,
+        fallback_triggered=fallback_triggered,
+        clarify_triggered=clarify_triggered,
+        source_count=source_count,
+        dominant_source_ratio=dominant_source_ratio,
+        multi_source_coverage=multi_source_coverage,
         predicted_answer=row.get("mock_answer", "N/A"),
         citations_count=citations_count,
-        multi_source_coverage=coverage,
         abstained=abstained,
         reason_code=reason_code,
-        compare_structure_quality=compare_quality,
+        compare_bucketed=compare_bucketed,
+        guardrail_triggered=guardrail_triggered,
         passed=passed,
         reason=reason,
     )
@@ -93,19 +119,20 @@ def main() -> None:
     Path(args.out_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     lines = [
-        "# Phase3A Eval Report",
+        "# Phase3B Eval Report",
         "",
         f"- total: {total}",
         f"- passed: {passed}",
         f"- failed: {total - passed}",
         "",
-        "| id | task_type | strategy | citations | coverage | abstained | passed | reason |",
-        "|---|---|---|---:|---:|---|---|---|",
+        "| id | task | skill | scope | strategy | rounds | fallback | clarify | src_count | dom_ratio | coverage | citations | abstained | reason |",
+        "|---|---|---|---|---|---:|---|---|---:|---:|---:|---:|---|---|",
     ]
     for item in results:
         lines.append(
-            f"| {item.id} | {item.task_type} | {item.planner_strategy} | {item.citations_count} | "
-            f"{item.multi_source_coverage:.2f} | {item.abstained} | {item.passed} | {item.reason} |"
+            f"| {item.id} | {item.task_type} | {item.selected_skill} | {item.selected_scope} | {item.planner_strategy} | "
+            f"{item.retrieval_rounds} | {item.fallback_triggered} | {item.clarify_triggered} | {item.source_count} | "
+            f"{item.dominant_source_ratio:.2f} | {item.multi_source_coverage:.2f} | {item.citations_count} | {item.abstained} | {item.reason} |"
         )
     Path(args.out_md).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
