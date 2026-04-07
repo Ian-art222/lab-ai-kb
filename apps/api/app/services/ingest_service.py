@@ -28,6 +28,14 @@ MIN_MEANINGFUL_TEXT_CHARS = 5
 MAX_INDEX_TEXT_CHARS = app_settings.ingest_max_index_text_chars
 
 logger = logging.getLogger(__name__)
+PIPELINE_VERSION = "v2_phase2"
+
+
+def _set_index_stage(db: Session, file_record: FileRecord, stage: str) -> None:
+    file_record.index_status = stage
+    file_record.pipeline_version = PIPELINE_VERSION
+    db.commit()
+    db.refresh(file_record)
 
 
 def _resolve_file_path(file_record: FileRecord) -> Path:
@@ -359,13 +367,16 @@ def _mark_index_success(
     index_embedding_dimension: int | None,
 ) -> FileRecord:
     file_record.extracted_text_length = extracted_text_length
-    file_record.index_status = "indexed"
+    file_record.index_status = "partial_failed" if warnings else "indexed"
     file_record.indexed_at = indexed_at
     file_record.index_error = None
+    file_record.last_error = None
+    file_record.last_error_code = None
     file_record.index_warning = "；".join(warnings) if warnings else None
     file_record.index_embedding_provider = index_embedding_provider
     file_record.index_embedding_model = index_embedding_model
     file_record.index_embedding_dimension = index_embedding_dimension
+    file_record.pipeline_version = PIPELINE_VERSION
     db.commit()
     db.refresh(file_record)
     return file_record
@@ -385,10 +396,13 @@ def _mark_index_failure(
     file_record.index_status = "failed"
     file_record.indexed_at = None
     file_record.index_error = error_message
+    file_record.last_error = error_message
+    file_record.last_error_code = "internal_error"
     file_record.index_warning = None
     file_record.index_embedding_provider = None
     file_record.index_embedding_model = None
     file_record.index_embedding_dimension = None
+    file_record.pipeline_version = PIPELINE_VERSION
     db.commit()
     db.refresh(file_record)
     return file_record
@@ -405,13 +419,16 @@ def ingest_file_job(
     prepare_indexing: bool,
 ) -> FileRecord:
     if prepare_indexing:
-        file_record.index_status = "indexing"
+        file_record.index_status = "pending"
         file_record.index_error = None
         file_record.index_warning = None
         file_record.indexed_at = None
+        file_record.last_error = None
+        file_record.last_error_code = None
         file_record.index_embedding_provider = None
         file_record.index_embedding_model = None
         file_record.index_embedding_dimension = None
+        file_record.pipeline_version = PIPELINE_VERSION
         db.commit()
         db.refresh(file_record)
     file_path = _resolve_file_path(file_record)
@@ -423,11 +440,13 @@ def ingest_file_job(
             raise ValueError("文件为空，无法建立索引")
 
         text = _extract_text(file_record, file_path)
+        _set_index_stage(db, file_record, "parsing")
         segments = _extract_segments(file_record, file_path)
         if not text.strip():
             raise ValueError("文件解析完成，但未提取到可用文本内容")
 
         limited_segments, truncated = _limit_segments(segments)
+        _set_index_stage(db, file_record, "chunking")
         warnings: list[str] = []
         if truncated:
             warnings.append(f"文件文本较长，本次仅截取前 {MAX_INDEX_TEXT_CHARS} 个字符建立索引")
@@ -572,6 +591,7 @@ def ingest_file_job(
                 settings.embedding_batch_size,
             )
             if child_indices:
+                _set_index_stage(db, file_record, "embedding")
                 embeddings = embed_texts(
                     provider=settings.embedding_provider,
                     api_base=settings.embedding_api_base,

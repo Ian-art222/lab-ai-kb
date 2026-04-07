@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api/qa", tags=["qa"])
 
 _active_ingest_file_ids: set[int] = set()
 _active_ingest_lock = Lock()
+_ACTIVE_INDEX_STATUSES = {"indexing", "parsing", "chunking", "embedding", "reindexing"}
 
 
 def _run_ingest_in_background(file_id: int) -> None:
@@ -83,6 +84,17 @@ def ask_question(
         if isinstance(refs, list):
             persist_qa_citations(db, message_id=assistant_message.id, references=refs)
         meta = result.get("retrieval_meta")
+        if isinstance(meta, dict):
+            meta = {
+                **meta,
+                "selected_evidence": result.get("references") if isinstance(result.get("references"), list) else [],
+                "evidence_bundles": result.get("evidence_bundles"),
+                "model_name": None,
+                "task_type": "qa",
+                "tool_traces_json": [],
+                "workflow_steps_json": [],
+                "session_context_json": {},
+            }
         persist_retrieval_trace(
             db,
             session_id=session.id,
@@ -112,7 +124,7 @@ def ask_question(
                 question=payload.question,
                 retrieval_meta=None,
                 answer_source="error",
-                debug_json={"message": str(exc)},
+                debug_json={"message": str(exc), "failure_reason_code": "internal_error"},
             )
         mark_last_qa_status(db, success=False, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -132,7 +144,7 @@ def ask_question(
                 question=payload.question,
                 retrieval_meta=None,
                 answer_source="error",
-                debug_json={"code": exc.code, "message": exc.message},
+                debug_json={"code": exc.code, "message": exc.message, "failure_reason_code": "model_generation_failed"},
             )
         mark_last_qa_status(db, success=False, error_message=exc.message)
         raise HTTPException(
@@ -153,7 +165,7 @@ def ingest_file(
         raise HTTPException(status_code=404, detail="文件不存在")
 
     with _active_ingest_lock:
-        already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status == "indexing"
+        already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status in _ACTIVE_INDEX_STATUSES
         if not already_running:
             _active_ingest_file_ids.add(payload.file_id)
 
@@ -167,7 +179,7 @@ def ingest_file(
             "queued": False,
         }
 
-    file_record.index_status = "indexing"
+    file_record.index_status = "pending"
     file_record.index_error = None
     file_record.index_warning = None
     file_record.indexed_at = None

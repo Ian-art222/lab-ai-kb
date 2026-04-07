@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     qa_pgvector_semantic_enabled: bool = True
     qa_pgvector_dimensions: int = 1536
 
+    # Governance / diagnostics
+    qa_failure_cases_dir: str = "evals/fixtures/failure_cases"
+
     # Chunking / parsing (text-only)
     ingest_chunk_size: int = 1000
     ingest_chunk_overlap: int = 150
