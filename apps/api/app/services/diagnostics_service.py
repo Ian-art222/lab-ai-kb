@@ -3,15 +3,42 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.file_record import FileRecord
 from app.models.knowledge import QACitation, QARetrievalTrace
-from app.schemas.diagnostics import TraceListResponse
+from app.schemas.diagnostics import TraceListItem, TraceListResponse
 from app.services.ingest_service import ingest_file_job
 
 _ACTIVE_INDEXING_STATUSES = {"parsing", "chunking", "embedding", "reindexing", "indexing"}
+
+
+def _extract_source_file_ids(selected_evidence: list | None, evidence_bundles: dict | None) -> list[int]:
+    file_ids: set[int] = set()
+
+    def consume_candidate(item):
+        if not isinstance(item, dict):
+            return
+        value = item.get("file_id") or item.get("source_file_id")
+        try:
+            if value is not None:
+                file_ids.add(int(value))
+        except (TypeError, ValueError):
+            return
+
+    for evidence in selected_evidence or []:
+        consume_candidate(evidence)
+
+    if isinstance(evidence_bundles, dict):
+        for _, bundle in evidence_bundles.items():
+            if isinstance(bundle, list):
+                for item in bundle:
+                    consume_candidate(item)
+            elif isinstance(bundle, dict):
+                consume_candidate(bundle)
+
+    return sorted(file_ids)
 
 
 def list_traces(
@@ -73,6 +100,7 @@ def list_traces(
             "latency_ms": row.latency_ms,
             "latency_breakdown": row.latency_breakdown_json,
             "created_at": row.created_at,
+            "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),
         }
         for row in rows
     ]
@@ -105,6 +133,7 @@ def get_trace_detail(db: Session, *, trace_id: str) -> dict:
         "latency_breakdown": row.latency_breakdown_json,
         "debug_json": row.debug_json,
         "created_at": row.created_at,
+        "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),
     }
 
 
@@ -128,3 +157,31 @@ def retry_or_reindex_file(db: Session, *, file_id: int, force_reindex: bool) -> 
     db.refresh(file_record)
 
     return ingest_file_job(db, file_record, prepare_indexing=True)
+
+
+def list_reason_code_stats(db: Session) -> list[dict[str, int | str]]:
+    rows = (
+        db.query(
+            func.coalesce(QARetrievalTrace.abstain_reason, QARetrievalTrace.failure_reason).label("reason_code"),
+            func.count(QARetrievalTrace.id).label("count"),
+        )
+        .filter(
+            or_(
+                QARetrievalTrace.abstain_reason.is_not(None),
+                QARetrievalTrace.failure_reason.is_not(None),
+            )
+        )
+        .group_by("reason_code")
+        .order_by(func.count(QARetrievalTrace.id).desc())
+        .all()
+    )
+    return [{"reason_code": str(reason), "count": int(count)} for reason, count in rows if reason]
+
+
+def export_trace(db: Session, *, trace_id: str) -> dict:
+    detail = get_trace_detail(db, trace_id=trace_id)
+    trace = TraceListItem.model_validate(detail)
+    return {
+        "trace": trace.model_dump(mode="json"),
+        "source_file_ids": detail.get("source_file_ids", []),
+    }

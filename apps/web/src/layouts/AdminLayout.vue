@@ -40,6 +40,10 @@
             <el-icon><User /></el-icon>
             <template #title>用户管理</template>
           </el-menu-item>
+          <el-menu-item v-if="authStore.isAdmin" index="/admin/diagnostics">
+            <el-icon><DataAnalysis /></el-icon>
+            <template #title>诊断中心</template>
+          </el-menu-item>
           <el-menu-item v-if="authStore.isAdmin" index="/settings">
             <el-icon><Setting /></el-icon>
             <template #title>系统设置</template>
@@ -85,7 +89,7 @@
 </template>
 
 <script setup lang="ts">
-import { ChatDotRound, Expand, Fold, Folder, House, Setting, SwitchButton, User } from '@element-plus/icons-vue'
+import { ChatDotRound, DataAnalysis, Expand, Fold, Folder, House, Setting, SwitchButton, User } from '@element-plus/icons-vue'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'

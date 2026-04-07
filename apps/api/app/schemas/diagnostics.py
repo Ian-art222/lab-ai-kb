@@ -41,3 +41,13 @@ class RetryIndexResponse(BaseModel):
     status: str
     retry_count: int
     last_error_code: str | None = None
+
+
+class TraceReasonStatItem(BaseModel):
+    reason_code: str
+    count: int
+
+
+class TraceExportResponse(BaseModel):
+    trace: TraceListItem
+    source_file_ids: list[int] = []
