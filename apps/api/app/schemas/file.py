@@ -43,3 +43,7 @@ class FileMetaItem(BaseModel):
 
 class FileMoveRequest(BaseModel):
     folder_id: int | None
+
+
+class BatchDownloadRequest(BaseModel):
+    file_ids: list[int]

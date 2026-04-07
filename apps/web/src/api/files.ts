@@ -101,6 +101,15 @@ export interface GetFilesParams {
 export type RenameFolderResult = FolderItem
 export type MoveFolderResult = FolderItem
 export type MoveFileResult = FileItem
+export type TransferStatus = 'pending' | 'uploading' | 'success' | 'failed'
+
+export interface UploadFileOptions {
+  onProgress?: (percent: number) => void
+}
+
+export interface DownloadFileOptions {
+  onProgress?: (percent: number) => void
+}
 
 async function readErrorMessage(
   response: Response,
@@ -138,6 +147,7 @@ export async function getFilesApi(params?: GetFilesParams): Promise<FileItem[]> 
 export async function uploadFileApi(
   file: File,
   folderId?: number | null,
+  options?: UploadFileOptions,
 ) {
   const formData = new FormData()
   formData.append('file', file)
@@ -146,10 +156,7 @@ export async function uploadFileApi(
     formData.append('folder_id', String(folderId))
   }
 
-  const response = await apiFetch('/api/files/upload', {
-    method: 'POST',
-    body: formData,
-  })
+  const response = await uploadWithProgress('/api/files/upload', formData, options)
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '上传失败'))
@@ -313,7 +320,7 @@ export async function getFileMetaApi(fileId: number): Promise<FileMetaItem> {
 }
 
 export async function downloadFileApi(fileId: number): Promise<void> {
-  const response = await apiFetch(`/api/files/${fileId}/download`)
+  const response = await downloadWithProgress(`/api/files/${fileId}/download`)
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '下载文件失败'))
@@ -331,4 +338,133 @@ export async function downloadFileApi(fileId: number): Promise<void> {
   link.click()
   link.remove()
   window.URL.revokeObjectURL(url)
+}
+
+export async function batchDownloadFilesApi(
+  fileIds: number[],
+  options?: DownloadFileOptions,
+): Promise<void> {
+  const response = await downloadWithProgress('/api/files/batch-download', {
+    method: 'POST',
+    body: JSON.stringify({ file_ids: fileIds }),
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  }, options)
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, '批量下载失败'))
+  }
+
+  const blob = await response.blob()
+  const disposition = response.headers.get('Content-Disposition') || ''
+  const matchedFileName = disposition.match(/filename="?([^"]+)"?/)
+  const fileName = matchedFileName?.[1] || 'files-batch.zip'
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+async function uploadWithProgress(
+  url: string,
+  formData: FormData,
+  options?: UploadFileOptions,
+): Promise<Response> {
+  const token = localStorage.getItem('token')
+  const headers: Record<string, string> = {}
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim()
+  return xhrRequest(`${baseUrl}${url}`, {
+    method: 'POST',
+    body: formData,
+    headers,
+    onUploadProgress: options?.onProgress,
+  })
+}
+
+async function downloadWithProgress(
+  url: string,
+  init: RequestInit = {},
+  options?: DownloadFileOptions,
+): Promise<Response> {
+  const token = localStorage.getItem('token')
+  const headers = new Headers(init.headers ?? {})
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim()
+  return xhrRequest(`${baseUrl}${url}`, {
+    method: init.method ?? 'GET',
+    body: (init.body as XMLHttpRequestBodyInit | null) ?? null,
+    headers: Object.fromEntries(headers.entries()),
+    responseType: 'blob',
+    onDownloadProgress: options?.onProgress,
+  })
+}
+
+function xhrRequest(
+  url: string,
+  config: {
+    method: string
+    body?: XMLHttpRequestBodyInit | null
+    headers?: Record<string, string>
+    responseType?: XMLHttpRequestResponseType
+    onUploadProgress?: (percent: number) => void
+    onDownloadProgress?: (percent: number) => void
+  },
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(config.method, url, true)
+    if (config.responseType) {
+      xhr.responseType = config.responseType
+    }
+    Object.entries(config.headers || {}).forEach(([key, value]) => {
+      xhr.setRequestHeader(key, value)
+    })
+    xhr.upload.onprogress = (event) => {
+      if (!config.onUploadProgress || !event.lengthComputable || event.total <= 0) return
+      config.onUploadProgress(Math.round((event.loaded / event.total) * 100))
+    }
+    xhr.onprogress = (event) => {
+      if (!config.onDownloadProgress || !event.lengthComputable || event.total <= 0) return
+      config.onDownloadProgress(Math.round((event.loaded / event.total) * 100))
+    }
+    xhr.onerror = () => reject(new Error('网络请求失败'))
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('username')
+        localStorage.removeItem('role')
+        if (window.location.pathname !== '/login') {
+          window.alert('登录状态已失效，请重新登录')
+          window.location.href = '/login'
+        }
+      }
+      const headers = new Headers()
+      xhr.getAllResponseHeaders()
+        .trim()
+        .split(/[\r\n]+/)
+        .forEach((line) => {
+          if (!line) return
+          const parts = line.split(': ')
+          const header = parts.shift()
+          if (header) headers.append(header, parts.join(': '))
+        })
+      const response = new Response(xhr.response, {
+        status: xhr.status,
+        statusText: xhr.statusText,
+        headers,
+      })
+      resolve(response)
+    }
+    xhr.send(config.body ?? null)
+  })
 }

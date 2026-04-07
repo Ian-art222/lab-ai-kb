@@ -63,6 +63,7 @@
               <input
                 ref="fileInputRef"
                 type="file"
+                multiple
                 style="display: none"
                 @change="handleFileChange"
               />
@@ -71,7 +72,7 @@
                 :loading="uploading"
                 @click="chooseFile"
               >
-                上传文件
+                批量上传
               </el-button>
             </div>
           </div>
@@ -131,7 +132,31 @@
           </el-table>
 
           <el-divider>文件</el-divider>
-          <el-table :data="filteredFiles" style="width: 100%" v-loading="loading">
+          <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 10px">
+            <el-tag type="info">已选中 {{ selectedFiles.length }} 项</el-tag>
+            <el-button
+              type="primary"
+              :disabled="selectedFiles.length === 0 || batchDownloading"
+              :loading="batchDownloading"
+              @click="handleBatchDownload"
+            >
+              批量下载
+            </el-button>
+            <el-button
+              :disabled="selectedFiles.length === 0"
+              @click="clearSelection"
+            >
+              取消选择
+            </el-button>
+          </div>
+          <el-table
+            ref="fileTableRef"
+            :data="filteredFiles"
+            style="width: 100%"
+            v-loading="loading"
+            @selection-change="handleSelectionChange"
+          >
+            <el-table-column type="selection" width="55" />
             <el-table-column prop="file_name" label="文件名" />
             <el-table-column prop="file_type" label="类型" width="120" />
             <el-table-column label="索引状态" width="120">
@@ -189,6 +214,45 @@
             description="当前目录暂无内容"
             style="padding: 24px 0 8px"
           />
+          <div
+            v-if="uploadQueue.length > 0"
+            style="margin-top: 16px"
+          >
+            <el-divider>上传进度</el-divider>
+            <div style="margin-bottom: 10px">
+              <div style="font-size: 13px; color: #666; margin-bottom: 6px">
+                总进度 {{ overallUploadProgress }}%
+              </div>
+              <el-progress :percentage="overallUploadProgress" />
+            </div>
+            <div
+              v-for="item in uploadQueue"
+              :key="item.id"
+              style="margin-bottom: 10px"
+            >
+              <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px">
+                <span>{{ item.name }}</span>
+                <span>{{ uploadStatusLabel[item.status] }} {{ item.progress }}%</span>
+              </div>
+              <el-progress
+                :percentage="item.progress"
+                :status="item.status === 'failed' ? 'exception' : item.status === 'success' ? 'success' : undefined"
+              />
+              <div v-if="item.error" style="font-size: 12px; color: #d03050; margin-top: 2px">
+                {{ item.error }}
+              </div>
+            </div>
+          </div>
+          <div
+            v-if="batchDownloading"
+            style="margin-top: 16px"
+          >
+            <el-divider>批量下载进度</el-divider>
+            <div style="font-size: 13px; color: #666; margin-bottom: 6px">
+              下载中 {{ batchDownloadProgress }}%
+            </div>
+            <el-progress :percentage="batchDownloadProgress" />
+          </div>
         </div>
       </el-card>
     </div>
@@ -328,6 +392,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { ElTable } from 'element-plus'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -336,6 +401,7 @@ import {
   createFolderApi,
   uploadFileApi,
   downloadFileApi,
+  batchDownloadFilesApi,
   renameFolderApi,
   moveFolderApi,
   deleteFolderApi,
@@ -365,6 +431,25 @@ const currentFiles = ref<FileItem[]>([])
 const loading = ref(false)
 const uploading = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const fileTableRef = ref<InstanceType<typeof ElTable> | null>(null)
+
+type UploadQueueItem = {
+  id: string
+  name: string
+  progress: number
+  status: 'pending' | 'uploading' | 'success' | 'failed'
+  error?: string
+}
+const uploadQueue = ref<UploadQueueItem[]>([])
+const uploadStatusLabel: Record<UploadQueueItem['status'], string> = {
+  pending: '等待中',
+  uploading: '上传中',
+  success: '成功',
+  failed: '失败',
+}
+const selectedFiles = ref<FileItem[]>([])
+const batchDownloading = ref(false)
+const batchDownloadProgress = ref(0)
 
 const renameFolderDialogVisible = ref(false)
 const renameFolderTargetId = ref<number | null>(null)
@@ -501,19 +586,61 @@ const chooseFile = () => {
   fileInputRef.value?.click()
 }
 
+const updateUploadItem = (
+  queueId: string,
+  patch: Partial<UploadQueueItem>,
+) => {
+  const idx = uploadQueue.value.findIndex((item) => item.id === queueId)
+  if (idx < 0) return
+  const prev = uploadQueue.value[idx]
+  if (!prev) return
+  uploadQueue.value[idx] = { ...prev, ...patch }
+}
+
 const handleFileChange = async (event: Event) => {
   const target = event.target as HTMLInputElement
-  const selectedFile = target.files?.[0]
+  const selectedFilesRaw = Array.from(target.files ?? [])
 
-  if (!selectedFile) {
+  if (selectedFilesRaw.length === 0) {
     return
   }
 
   try {
     uploading.value = true
-    await uploadFileApi(selectedFile, currentFolderId.value)
-    ElMessage.success('文件上传成功')
+    const queueItems: UploadQueueItem[] = selectedFilesRaw.map((file) => ({
+      id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+      name: file.name,
+      progress: 0,
+      status: 'pending',
+    }))
+    uploadQueue.value = queueItems
+
+    await Promise.all(
+      selectedFilesRaw.map(async (file, index) => {
+        const queueId = queueItems[index]?.id
+        if (!queueId) return
+        updateUploadItem(queueId, { status: 'uploading', progress: 0, error: undefined })
+        try {
+          await uploadFileApi(file, currentFolderId.value, {
+            onProgress: (percent) => {
+              updateUploadItem(queueId, { progress: percent, status: 'uploading' })
+            },
+          })
+          updateUploadItem(queueId, { status: 'success', progress: 100 })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '文件上传失败'
+          updateUploadItem(queueId, { status: 'failed', error: message })
+        }
+      }),
+    )
+
     await loadChildren()
+    const failedCount = uploadQueue.value.filter((item) => item.status === 'failed').length
+    if (failedCount === 0) {
+      ElMessage.success(`成功上传 ${uploadQueue.value.length} 个文件`)
+    } else {
+      ElMessage.warning(`上传完成：成功 ${uploadQueue.value.length - failedCount}，失败 ${failedCount}`)
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : '文件上传失败'
     ElMessage.error(message)
@@ -531,6 +658,38 @@ const handleDownload = async (fileId: number) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : '下载失败'
     ElMessage.error(message)
+  }
+}
+
+const handleSelectionChange = (rows: FileItem[]) => {
+  selectedFiles.value = rows
+}
+
+const clearSelection = () => {
+  fileTableRef.value?.clearSelection()
+  selectedFiles.value = []
+}
+
+const handleBatchDownload = async () => {
+  if (selectedFiles.value.length === 0) {
+    ElMessage.warning('请先选择要下载的文件')
+    return
+  }
+  try {
+    batchDownloading.value = true
+    batchDownloadProgress.value = 0
+    await batchDownloadFilesApi(selectedFiles.value.map((item) => item.id), {
+      onProgress: (percent) => {
+        batchDownloadProgress.value = percent
+      },
+    })
+    batchDownloadProgress.value = 100
+    ElMessage.success(`已下载 ${selectedFiles.value.length} 个文件`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '批量下载失败'
+    ElMessage.error(message)
+  } finally {
+    batchDownloading.value = false
   }
 }
 
@@ -645,6 +804,12 @@ const filteredFiles = computed(() => {
   return currentFiles.value.filter((f) =>
     f.file_name.toLowerCase().includes(keyword),
   )
+})
+
+const overallUploadProgress = computed(() => {
+  if (uploadQueue.value.length === 0) return 0
+  const sum = uploadQueue.value.reduce((acc, item) => acc + item.progress, 0)
+  return Math.round(sum / uploadQueue.value.length)
 })
 
 const folderNodeById = computed(() => {

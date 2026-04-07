@@ -1,9 +1,11 @@
 import hashlib
+import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -16,7 +18,7 @@ from app.models.file_record import FileRecord
 from app.models.knowledge import QAMessage, QASession
 from app.models.system_setting import SystemSetting
 from app.models.user import User
-from app.schemas.file import FileItem, FileMetaItem, FileMoveRequest
+from app.schemas.file import BatchDownloadRequest, FileItem, FileMetaItem, FileMoveRequest
 from app.schemas.folder import (
     BreadcrumbItem,
     FolderChildrenResponse,
@@ -669,6 +671,78 @@ def download_file(
     )
 
 
+@router.post("/batch-download")
+def batch_download_files(
+    payload: BatchDownloadRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    deduped_ids = list(dict.fromkeys(payload.file_ids or []))
+    if not deduped_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个文件")
+
+    file_records = (
+        db.query(FileRecord)
+        .filter(FileRecord.id.in_(deduped_ids))
+        .all()
+    )
+    file_records.sort(key=lambda record: deduped_ids.index(record.id))
+    found_ids = {record.id for record in file_records}
+    missing_ids = [fid for fid in deduped_ids if fid not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"文件不存在: {missing_ids}")
+
+    file_infos: list[tuple[FileRecord, Path]] = []
+    for file_record in file_records:
+        file_path = _get_file_storage_path(file_record)
+        if not file_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"服务器上未找到文件: {file_record.file_name}",
+            )
+        file_infos.append((file_record, file_path))
+
+    tmp_file = tempfile.NamedTemporaryFile(prefix="lab-ai-kb-batch-", suffix=".zip", delete=False)
+    zip_path = Path(tmp_file.name)
+    tmp_file.close()
+
+    try:
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zipf:
+            used_names: set[str] = set()
+            for file_record, file_path in file_infos:
+                arc_name = file_record.file_name
+                if arc_name in used_names:
+                    stem = Path(arc_name).stem
+                    suffix = Path(arc_name).suffix
+                    arc_name = f"{stem}-{file_record.id}{suffix}"
+                used_names.add(arc_name)
+                zipf.write(file_path, arcname=arc_name)
+
+        zip_size = zip_path.stat().st_size
+        filename = f"files-batch-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.zip"
+
+        def _cleanup(path: Path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+
+        background_tasks.add_task(_cleanup, zip_path)
+
+        return FileResponse(
+            path=zip_path,
+            filename=filename,
+            media_type="application/zip",
+            headers={"Content-Length": str(zip_size)},
+        )
+    except Exception:
+        if zip_path.exists():
+            zip_path.unlink(missing_ok=True)
+        raise
+
+
 @router.patch("/{file_id}/move", response_model=FileItem)
 def move_file(
     file_id: int,
@@ -804,4 +878,3 @@ def file_meta(
         "content_hash": file_record.content_hash,
         "file_size": file_record.file_size,
     }
-
