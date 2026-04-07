@@ -223,3 +223,13 @@ python scripts/eval_rag.py --input evals/source_diversity_eval.sample.jsonl --ou
 - 非文本内容能力有限（不做 OCR/多模态）
 - 下载进度百分比依赖浏览器对 `Content-Length` 的可计算性
 - 评测结论依赖真实索引数据，不可仅凭样例模板得出线上质量结论
+
+
+## 12. Docker Compose（单机部署）
+
+仓库已提供可直接部署的 `web + api + db` Compose 方案：
+
+- 启动文档见 `docs/deployment.md` 的“Docker Compose 部署（单机 2 CPU / 4GB）”章节
+- 默认仅暴露 `127.0.0.1:8080`，便于宿主机再反向代理
+- LLM / embedding 仍通过外部 Provider API，不在本机推理
+
