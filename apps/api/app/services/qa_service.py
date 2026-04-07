@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import time
+from collections import defaultdict
 from datetime import datetime
 
 from sqlalchemy import func, or_
@@ -113,6 +114,14 @@ def _build_retrieval_meta(
     rerank_applied: bool,
     parent_recovered_chunks: int = 0,
     parent_deduped_groups: int = 0,
+    distinct_docs_in_topk: int = 0,
+    distinct_docs_in_context: int = 0,
+    same_doc_chunk_ratio: float = 0.0,
+    adjacent_chunk_redundancy_rate: float = 0.0,
+    dominance_guardrail_triggered: bool = False,
+    diversity_rerank_enabled: bool = False,
+    diversity_rerank_applied: bool = False,
+    diversity_rerank_fetch_k: int = 0,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -148,6 +157,14 @@ def _build_retrieval_meta(
         "rerank_applied": rerank_applied,
         "parent_recovered_chunks": parent_recovered_chunks,
         "parent_deduped_groups": parent_deduped_groups,
+        "distinct_docs_in_topk": distinct_docs_in_topk,
+        "distinct_docs_in_context": distinct_docs_in_context,
+        "same_doc_chunk_ratio": same_doc_chunk_ratio,
+        "adjacent_chunk_redundancy_rate": adjacent_chunk_redundancy_rate,
+        "dominance_guardrail_triggered": dominance_guardrail_triggered,
+        "diversity_rerank_enabled": diversity_rerank_enabled,
+        "diversity_rerank_applied": diversity_rerank_applied,
+        "diversity_rerank_fetch_k": diversity_rerank_fetch_k,
     }
 
 
@@ -250,6 +267,131 @@ def _dedupe_chunk_items(items: list[dict]) -> list[dict]:
     return [best[cid] for cid in order]
 
 
+def _doc_key(item: dict) -> int:
+    return int(item["chunk"].file_id)
+
+
+def _normalize_text_for_similarity(text: str) -> set[str]:
+    compact = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return {tok for tok in re.split(r"[^\w\u4e00-\u9fff]+", compact) if tok}
+
+
+def _text_jaccard_similarity(a: str, b: str) -> float:
+    sa = _normalize_text_for_similarity(a)
+    sb = _normalize_text_for_similarity(b)
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def _diversity_rerank_matches(
+    matches: list[dict],
+    *,
+    enabled: bool,
+    diversity_lambda: float,
+    fetch_k: int,
+    redundancy_sim_threshold: float,
+) -> tuple[list[dict], bool]:
+    if not enabled or len(matches) <= 1:
+        return list(matches), False
+
+    k = max(1, min(fetch_k, len(matches)))
+    lam = max(0.0, min(1.0, diversity_lambda))
+    pool = list(matches[:k])
+    selected: list[dict] = []
+
+    while pool:
+        if not selected:
+            best_idx = 0
+        else:
+            best_idx = 0
+            best_score = -10**9
+            for idx, item in enumerate(pool):
+                rel = float(item.get("rerank_score", item.get("score", 0.0)))
+                penalties = []
+                for chosen in selected:
+                    same_doc = 1.0 if _doc_key(chosen) == _doc_key(item) else 0.0
+                    sim = _text_jaccard_similarity(chosen["chunk"].content or "", item["chunk"].content or "")
+                    if sim < redundancy_sim_threshold:
+                        sim = 0.0
+                    penalties.append(max(same_doc, sim))
+                penalty = max(penalties) if penalties else 0.0
+                mmr_score = lam * rel - (1.0 - lam) * penalty
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = idx
+        selected.append(pool.pop(best_idx))
+
+    return selected + list(matches[k:]), True
+
+
+def _dominance_guardrail(
+    reliable_matches: list[dict],
+    *,
+    dominance_ratio: float,
+) -> bool:
+    if len(reliable_matches) < 2:
+        return True
+    top_by_doc: dict[int, float] = {}
+    for item in reliable_matches:
+        dk = _doc_key(item)
+        top_by_doc[dk] = max(top_by_doc.get(dk, 0.0), float(item["score"]))
+    if len(top_by_doc) < 2:
+        return True
+    vals = sorted(top_by_doc.values(), reverse=True)
+    return vals[0] >= vals[1] * max(1.0, dominance_ratio)
+
+
+def _select_doc_aware_matches(
+    reliable_matches: list[dict],
+    *,
+    max_chunks_per_doc: int,
+    target_distinct_docs: int,
+    top_k: int,
+    allow_single_doc_dominance: bool,
+) -> list[dict]:
+    if not reliable_matches:
+        return []
+    if allow_single_doc_dominance:
+        return reliable_matches[:top_k]
+
+    max_per_doc = max(1, max_chunks_per_doc)
+    target_docs = max(1, target_distinct_docs)
+    selected: list[dict] = []
+    selected_ids: set[int] = set()
+    per_doc_count: dict[int, int] = defaultdict(int)
+
+    for item in reliable_matches:
+        if len(selected) >= top_k:
+            break
+        dk = _doc_key(item)
+        if per_doc_count[dk] > 0:
+            continue
+        selected.append(item)
+        selected_ids.add(item["chunk"].id)
+        per_doc_count[dk] += 1
+        if len(per_doc_count) >= target_docs:
+            break
+
+    for item in reliable_matches:
+        if len(selected) >= top_k:
+            break
+        cid = item["chunk"].id
+        if cid in selected_ids:
+            continue
+        dk = _doc_key(item)
+        if per_doc_count[dk] >= max_per_doc:
+            continue
+        selected.append(item)
+        selected_ids.add(cid)
+        per_doc_count[dk] += 1
+    return selected
+
+
 def _recover_parent_context_for_packing(
     db: Session,
     items: list[dict],
@@ -308,14 +450,16 @@ def _pack_context_and_references(
     seed_chunk_ids: set[int],
     max_context_chars: int,
     dedupe_adjacent_chunks: bool,
-) -> tuple[list[str], list[dict], list[int], int, int, int]:
+    redundancy_sim_threshold: float,
+    redundancy_adjacent_window: int,
+) -> tuple[list[str], list[dict], list[int], int, int, int, float]:
     """
     Greedy pack into max_context_chars. Prioritize seed hits (then by score, file, chunk_index).
     If item has _pack_text (parent recovery), use it for the LLM block body; references stay on child chunk.
     Returns context_blocks, references, used_files, context_chars, packed_chunks, parent_recovered_chunks.
     """
     if max_context_chars < 1:
-        return [], [], [], 0, 0, 0
+        return [], [], [], 0, 0, 0, 0.0
 
     def sort_key(it: dict) -> tuple:
         cid = it["chunk"].id
@@ -329,8 +473,12 @@ def _pack_context_and_references(
     total_chars = 0
     last_content_norm: str | None = None
     parent_recovered_chunks = 0
+    suppressed_redundant = 0
+    considered = 0
+    by_doc_kept: dict[int, list[tuple[int, str]]] = defaultdict(list)
 
     for item in sorted_items:
+        considered += 1
         chunk = item["chunk"]
         body = item.get("_pack_text")
         if body is None:
@@ -342,7 +490,21 @@ def _pack_context_and_references(
             break
         content_norm = body.strip()
         if dedupe_adjacent_chunks and last_content_norm is not None and content_norm == last_content_norm:
+            suppressed_redundant += 1
             continue
+        if dedupe_adjacent_chunks:
+            same_doc = by_doc_kept.get(int(chunk.file_id), [])
+            suppressed = False
+            for kept_index, kept_body in same_doc:
+                if abs(int(chunk.chunk_index) - kept_index) > max(0, redundancy_adjacent_window):
+                    continue
+                sim = _text_jaccard_similarity(content_norm, kept_body)
+                if sim >= max(0.0, min(1.0, redundancy_sim_threshold)):
+                    suppressed = True
+                    break
+            if suppressed:
+                suppressed_redundant += 1
+                continue
         context_blocks.append(block)
         if item.get("_used_parent_for_pack"):
             parent_recovered_chunks += 1
@@ -362,8 +524,10 @@ def _pack_context_and_references(
             used_files.append(chunk.file_id)
         total_chars += add_len
         last_content_norm = content_norm
+        by_doc_kept[int(chunk.file_id)].append((int(chunk.chunk_index), content_norm))
 
-    return context_blocks, references, used_files, total_chars, len(references), parent_recovered_chunks
+    redundancy_rate = suppressed_redundant / considered if considered else 0.0
+    return context_blocks, references, used_files, total_chars, len(references), parent_recovered_chunks, redundancy_rate
 
 
 class QAServiceError(Exception):
@@ -1188,6 +1352,15 @@ def ask_question(
         if rerank_top_n is not None
         else max(1, app_settings.qa_rerank_top_n)
     )
+    max_chunks_per_doc = max(1, int(app_settings.qa_max_chunks_per_doc))
+    target_distinct_docs = max(1, int(app_settings.qa_target_distinct_docs))
+    min_distinct_docs_for_multi = max(1, int(app_settings.qa_min_distinct_docs_for_multi_source))
+    single_doc_dominance_ratio = max(1.0, float(app_settings.qa_single_doc_dominance_ratio))
+    diversity_rerank_enabled = bool(app_settings.qa_diversity_rerank_enabled)
+    diversity_rerank_fetch_k = max(1, int(app_settings.qa_diversity_fetch_k))
+    diversity_lambda = float(app_settings.qa_diversity_lambda)
+    redundancy_sim_threshold = max(0.0, min(1.0, float(app_settings.qa_redundancy_sim_threshold)))
+    redundancy_adjacent_window = max(0, int(app_settings.qa_redundancy_adjacent_window))
     pool_limit = min(QA_RETRIEVAL_POOL_CAP, max(MIN_TOP_K, top_k, candidate_k))
 
     retrieval_mode = _normalize_retrieval_mode(app_settings.qa_retrieval_mode)
@@ -1309,14 +1482,41 @@ def ask_question(
         rerank_top_n=eff_rerank_top_n,
         rerank_model_name=app_settings.qa_rerank_model_name,
     )
+    unique_docs_before_diversity = len({_doc_key(item) for item in matches})
+    matches, diversity_applied = _diversity_rerank_matches(
+        matches,
+        enabled=diversity_rerank_enabled,
+        diversity_lambda=diversity_lambda,
+        fetch_k=diversity_rerank_fetch_k,
+        redundancy_sim_threshold=redundancy_sim_threshold,
+    )
+    unique_docs_after_diversity = len({_doc_key(item) for item in matches})
     rerank_output_count = len(matches)
 
     candidate_matches = _truncate_ranked_to_candidate_k(matches, candidate_k)
     score_threshold_applied = _score_threshold_for_mode(retrieval_mode)
     reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
+    distinct_docs_in_topk = len({_doc_key(item) for item in candidate_matches})
+    dominance_guardrail_triggered = _dominance_guardrail(
+        reliable_matches,
+        dominance_ratio=single_doc_dominance_ratio,
+    )
+    allow_single_doc_dominance = dominance_guardrail_triggered or (
+        len({_doc_key(item) for item in reliable_matches}) < min_distinct_docs_for_multi
+    )
+    selected_reliable_matches = _select_doc_aware_matches(
+        reliable_matches,
+        max_chunks_per_doc=max_chunks_per_doc,
+        target_distinct_docs=target_distinct_docs,
+        top_k=top_k,
+        allow_single_doc_dominance=allow_single_doc_dominance,
+    )
+    per_doc_selected: dict[int, list[int]] = defaultdict(list)
+    for item in selected_reliable_matches:
+        per_doc_selected[int(item["chunk"].file_id)].append(int(item["chunk"].chunk_index))
     compatible_count = len(compatible_file_ids)
     logger.info(
-        "QA retrieval mode=%s strategy=%s compatible_files=%s semantic=%s lexical=%s fused=%s reliable=%s threshold=%.4f rerank=%s",
+        "QA retrieval mode=%s strategy=%s compatible_files=%s semantic=%s lexical=%s fused=%s reliable=%s selected=%s threshold=%.4f rerank=%s diversity=%s unique_docs_before=%s unique_docs_after=%s dominance=%s per_doc=%s",
         retrieval_mode,
         retrieval_strategy,
         compatible_count,
@@ -1324,8 +1524,14 @@ def ask_question(
         len(lexical_matches),
         len(matches),
         len(reliable_matches),
+        len(selected_reliable_matches),
         score_threshold_applied,
         rerank_applied,
+        diversity_applied,
+        unique_docs_before_diversity,
+        unique_docs_after_diversity,
+        dominance_guardrail_triggered,
+        dict(per_doc_selected),
     )
 
     try:
@@ -1340,11 +1546,11 @@ def ask_question(
                     "NO_RELIABLE_EVIDENCE",
                     "知识库中未找到足够相关的依据，严格模式下无法回答。",
                 )
-            expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
+            expanded_items = _expand_neighbor_chunks(db, selected_reliable_matches, neighbor_window)
             expanded_n = len(expanded_items)
             deduped_items = _dedupe_chunk_items(expanded_items)
             pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, deduped_items)
-            seed_ids = {item["chunk"].id for item in reliable_matches}
+            seed_ids = {item["chunk"].id for item in selected_reliable_matches}
             (
                 context_blocks,
                 references,
@@ -1352,13 +1558,17 @@ def ask_question(
                 context_chars,
                 packed_n,
                 parent_recovered_chunks,
+                adjacent_chunk_redundancy_rate,
             ) = _pack_context_and_references(
                 pack_items,
                 seed_chunk_ids=seed_ids,
                 max_context_chars=max_context_chars,
                 dedupe_adjacent_chunks=dedupe_adjacent,
+                redundancy_sim_threshold=redundancy_sim_threshold,
+                redundancy_adjacent_window=redundancy_adjacent_window,
             )
             if packed_n < max(1, int(app_settings.qa_strict_min_citations)):
+                logger.info("strict evidence decision=reject reason=insufficient_citations packed=%s", packed_n)
                 raise QAServiceError(
                     "NO_RELIABLE_EVIDENCE",
                     "知识库证据不足，严格模式下无法给出可引用回答。",
@@ -1367,6 +1577,7 @@ def ask_question(
                 "你是实验室内部知识库问答助手。你只允许根据下方「资料片段」回答问题。\n"
                 "要求：\n"
                 "- 结论必须可由资料支撑；不要引入资料未提及的关键事实。\n"
+                "- 若单一来源证据已完整充分，可基于该来源作答；若多来源互补，请综合多来源关键信息。\n"
                 "- 若资料不足以回答用户问题，请明确说明无法根据当前知识库资料作出完整回答，不要猜测，"
                 "也不要改用通用知识或常识来替代知识库依据。\n\n"
                 f"问题：{question}\n\n资料片段：\n"
@@ -1377,10 +1588,12 @@ def ask_question(
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
             if not _is_grounded_answer(answer, references):
+                logger.info("strict evidence decision=reject reason=grounding_guard")
                 raise QAServiceError(
                     "NO_RELIABLE_EVIDENCE",
                     "知识库证据不足，严格模式下无法给出可引用回答。",
                 )
+            logger.info("strict evidence decision=accept citations=%s", len(references))
             retrieval_meta = _build_retrieval_meta(
                 retrieval_strategy=retrieval_strategy,
                 answer_source="knowledge_base",
@@ -1410,6 +1623,14 @@ def ask_question(
                 rerank_applied=rerank_applied,
                 parent_recovered_chunks=parent_recovered_chunks,
                 parent_deduped_groups=parent_deduped_groups,
+                distinct_docs_in_topk=distinct_docs_in_topk,
+                distinct_docs_in_context=len(set(used_files)),
+                same_doc_chunk_ratio=((packed_n - len(set(used_files))) / packed_n if packed_n else 0.0),
+                adjacent_chunk_redundancy_rate=adjacent_chunk_redundancy_rate,
+                dominance_guardrail_triggered=dominance_guardrail_triggered,
+                diversity_rerank_enabled=diversity_rerank_enabled,
+                diversity_rerank_applied=diversity_applied,
+                diversity_rerank_fetch_k=diversity_rerank_fetch_k,
             )
             return {
                 "answer": answer,
@@ -1420,12 +1641,12 @@ def ask_question(
                 "retrieval_meta": retrieval_meta,
             }
 
-        if reliable_matches:
-            expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
+        if selected_reliable_matches:
+            expanded_items = _expand_neighbor_chunks(db, selected_reliable_matches, neighbor_window)
             expanded_n = len(expanded_items)
             deduped_items = _dedupe_chunk_items(expanded_items)
             pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, deduped_items)
-            seed_ids = {item["chunk"].id for item in reliable_matches}
+            seed_ids = {item["chunk"].id for item in selected_reliable_matches}
             (
                 context_blocks,
                 references,
@@ -1433,16 +1654,21 @@ def ask_question(
                 context_chars,
                 packed_n,
                 parent_recovered_chunks,
+                adjacent_chunk_redundancy_rate,
             ) = _pack_context_and_references(
                 pack_items,
                 seed_chunk_ids=seed_ids,
                 max_context_chars=max_context_chars,
                 dedupe_adjacent_chunks=dedupe_adjacent,
+                redundancy_sim_threshold=redundancy_sim_threshold,
+                redundancy_adjacent_window=redundancy_adjacent_window,
             )
             user_prompt = (
                 "你是实验室知识库问答助手。请优先根据下方「资料片段」回答问题。\n"
                 "要求：\n"
                 "- 当资料足以支撑结论时，以资料为准，回答应体现资料中的要点。\n"
+                "- 若多个来源提供互补证据，优先综合多个来源；避免机械重复同一来源的连续片段。\n"
+                "- 若单一来源已完整覆盖问题，可直接基于该来源回答。\n"
                 "- 若资料仅有部分相关信息，可先说明资料中的依据，再在必要时少量结合常识补充，"
                 "但不要与资料矛盾，也不要虚构资料中不存在的内容或引用。\n"
                 "- 若资料明显不足以判断用户问题，请说明资料局限，不要假装资料已覆盖。\n\n"
@@ -1462,6 +1688,7 @@ def ask_question(
                 )
                 reliable_matches = []
             else:
+                logger.info("non-strict evidence decision=accept citations=%s", len(references))
                 retrieval_meta = _build_retrieval_meta(
                     retrieval_strategy=retrieval_strategy,
                     answer_source="knowledge_base",
@@ -1491,6 +1718,14 @@ def ask_question(
                     rerank_applied=rerank_applied,
                     parent_recovered_chunks=parent_recovered_chunks,
                     parent_deduped_groups=parent_deduped_groups,
+                    distinct_docs_in_topk=distinct_docs_in_topk,
+                    distinct_docs_in_context=len(set(used_files)),
+                    same_doc_chunk_ratio=((packed_n - len(set(used_files))) / packed_n if packed_n else 0.0),
+                    adjacent_chunk_redundancy_rate=adjacent_chunk_redundancy_rate,
+                    dominance_guardrail_triggered=dominance_guardrail_triggered,
+                    diversity_rerank_enabled=diversity_rerank_enabled,
+                    diversity_rerank_applied=diversity_applied,
+                    diversity_rerank_fetch_k=diversity_rerank_fetch_k,
                 )
                 return {
                     "answer": answer,
@@ -1521,6 +1756,7 @@ def ask_question(
         answer = MODEL_NON_KB_PREFIX + answer
         low_confidence = bool(candidate_matches)
         answer_src = "knowledge_base_low_confidence" if low_confidence else "model_general"
+        logger.info("non-strict evidence decision=fallback answer_source=%s", answer_src)
         refs_payload = {"answer_source": answer_src, "references": []}
         retrieval_meta = _build_retrieval_meta(
             retrieval_strategy=retrieval_strategy,

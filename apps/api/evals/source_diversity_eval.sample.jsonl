@@ -1,0 +1,15 @@
+{"id":"single_001","question":"项目的登录鉴权流程是如何实现的？","strict":true,"scenario_tags":["single-source-sufficient"],"expected_behavior":"single_source_ok","notes":"理想情况下一篇后端认证设计文档即可完整回答，不应为了多样性强行混入其他文档。"}
+{"id":"single_002","question":"系统是如何配置 PostgreSQL 连接与连接池参数的？","strict":true,"scenario_tags":["single-source-sufficient"],"expected_behavior":"single_source_ok","notes":"通常 deployment 或 config 文档单篇足够。"}
+{"id":"single_003","question":"文件上传接口的请求流程和返回结构是什么？","strict":true,"scenario_tags":["single-source-sufficient"],"expected_behavior":"single_source_ok","notes":"API 文档或接口实现单篇通常足够。"}
+{"id":"multi_001","question":"这个知识库项目的检索链路由哪些阶段组成？分别在哪些模块里实现？","strict":true,"scenario_tags":["multi-source-complementary"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"理想回答应综合架构说明、检索实现、rerank/QA 服务等多个来源。"}
+{"id":"multi_002","question":"strict 和 non-strict 两种回答模式有什么差异？这种差异分别体现在哪些代码或文档中？","strict":true,"scenario_tags":["multi-source-complementary"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"单篇文档往往不够，应综合 prompt、service 逻辑、README 或 docs。"}
+{"id":"multi_003","question":"项目现在对文本型 RAG 的支持边界是什么？支持哪些文件类型，不支持哪些能力？","strict":true,"scenario_tags":["multi-source-complementary"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"适合综合 README、ingest/解析实现、限制说明。"}
+{"id":"dominance_001","question":"请总结 deployment 文档里关于环境变量配置的主要内容。","strict":true,"scenario_tags":["long-doc-dominance"],"expected_behavior":"single_source_ok_but_no_chunk_flooding","notes":"答案可能主要来自同一篇长文档，但不应被多个相邻 chunk 重复塞满 context。"}
+{"id":"dominance_002","question":"README 中关于本地启动后端服务的步骤是什么？","strict":true,"scenario_tags":["long-doc-dominance"],"expected_behavior":"single_source_ok_but_no_chunk_flooding","notes":"允许单来源主导，但应减少相邻 chunk 霸榜。"}
+{"id":"dominance_003","question":"请概括系统设置页支持哪些配置项。","strict":true,"scenario_tags":["long-doc-dominance"],"expected_behavior":"single_source_ok_but_no_chunk_flooding","notes":"若设置说明主要集中于单篇文档，仍应减少重复 chunk。"}
+{"id":"adjacent_001","question":"解释一下 rerank 在问答流程中的作用。","strict":true,"scenario_tags":["adjacent-chunk-overlap"],"expected_behavior":"reduce_adjacent_redundancy","notes":"历史上容易命中同文件内连续 chunk；优化后应减少重复表达。"}
+{"id":"adjacent_002","question":"context assembly 是怎么做的？","strict":true,"scenario_tags":["adjacent-chunk-overlap"],"expected_behavior":"reduce_adjacent_redundancy","notes":"如果实现说明跨多个相邻 chunk，优化后应保留关键信息但减少边界重复。"}
+{"id":"adjacent_003","question":"知识库检索结果是怎样被打包进最终 prompt 的？","strict":true,"scenario_tags":["adjacent-chunk-overlap"],"expected_behavior":"reduce_adjacent_redundancy","notes":"考察相邻 chunk 合并/去冗余是否生效。"}
+{"id":"refuse_001","question":"这个系统未来会不会支持图片 OCR 和多模态问答？","strict":true,"scenario_tags":["should-refuse"],"expected_behavior":"refuse_or_conservative","notes":"当前边界明确是不做多模态，应保守回答，不能编造。"}
+{"id":"refuse_002","question":"请根据现有资料告诉我视频解析模块的实现细节。","strict":true,"scenario_tags":["should-refuse"],"expected_behavior":"refuse_or_conservative","notes":"项目边界内无此能力，应拒答或说明证据不足。"}
+{"id":"refuse_003","question":"系统如何对扫描版 PDF 做 OCR 识别？","strict":true,"scenario_tags":["should-refuse"],"expected_behavior":"refuse_or_conservative","notes":"当前明确不做 OCR，应保守回答。"}

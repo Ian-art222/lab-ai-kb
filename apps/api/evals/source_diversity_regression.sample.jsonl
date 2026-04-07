@@ -1,0 +1,5 @@
+{"id":"reg_001","question":"请总结问答主流程从检索到生成答案的完整步骤。","strict":true,"scenario_tags":["multi-source-complementary","adjacent-chunk-overlap"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"覆盖 retrieval -> rerank -> context assembly -> answer 的完整链路。"}
+{"id":"reg_002","question":"请解释为什么系统以前容易从同一篇文档取多个相邻 chunk。","strict":true,"scenario_tags":["multi-source-complementary","long-doc-dominance"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"验证历史问题定位与新策略边界是否能被准确回答。"}
+{"id":"reg_003","question":"请概括当前 source diversity control 的设计目标和适用边界。","strict":true,"scenario_tags":["multi-source-complementary"],"expected_behavior":"prefer_multi_source_when_helpful","notes":"验证“不是强制多来源，而是降低同文档 flood”。"}
+{"id":"reg_004","question":"deployment 文档中与环境变量相关的关键配置有哪些？","strict":true,"scenario_tags":["single-source-sufficient","long-doc-dominance"],"expected_behavior":"single_source_ok_but_no_chunk_flooding","notes":"允许单文档主导，但观察是否出现相邻 chunk 重复占位。"}
+{"id":"reg_005","question":"系统如何处理相邻 chunk 的冗余问题？","strict":true,"scenario_tags":["adjacent-chunk-overlap"],"expected_behavior":"reduce_adjacent_redundancy","notes":"专门回归 adjacent redundancy suppression 的行为。"}

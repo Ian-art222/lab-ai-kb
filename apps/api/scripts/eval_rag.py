@@ -29,15 +29,22 @@ def _default_output_path() -> str:
 def _parse_sample(obj: dict[str, Any]) -> dict[str, Any]:
     if "question" not in obj or not str(obj["question"]).strip():
         raise ValueError("missing or empty 'question'")
+    strict_value = obj.get("strict_mode")
+    if strict_value is None:
+        strict_value = obj.get("strict", False)
     return {
+        "id": obj.get("id"),
         "question": str(obj["question"]).strip(),
         "scope_type": str(obj.get("scope_type", "all")),
         "folder_id": obj.get("folder_id"),
         "file_ids": obj.get("file_ids"),
-        "strict_mode": bool(obj.get("strict_mode", False)),
+        "strict_mode": bool(strict_value),
         "expected_file_ids": obj.get("expected_file_ids"),
         "expected_chunk_ids": obj.get("expected_chunk_ids"),
         "expected_keywords": obj.get("expected_keywords"),
+        "scenario_tags": obj.get("scenario_tags"),
+        "expected_behavior": obj.get("expected_behavior"),
+        "notes": obj.get("notes"),
     }
 
 
@@ -161,6 +168,15 @@ def _aggregate_round(
     ndcg_sum = 0.0
     ndcg_n = 0
     retrieval_strategy: Counter[str] = Counter()
+    distinct_docs_topk: list[float] = []
+    distinct_docs_context: list[float] = []
+    same_doc_chunk_ratio_vals: list[float] = []
+    adjacent_redundancy_vals: list[float] = []
+    multi_source_answers = 0
+    citation_source_diversity_vals: list[float] = []
+    unsupported_multi_source = 0
+    single_source_when_sufficient_eval = 0
+    single_source_when_sufficient_hits = 0
 
     for sample, row in zip(samples, rows):
         if not row.get("ok"):
@@ -171,6 +187,29 @@ def _aggregate_round(
             rerank_yes += 1
         meta = row.get("retrieval_meta") or {}
         retrieval_strategy[str(meta.get("retrieval_strategy") or "unknown")] += 1
+        topk_docs = meta.get("distinct_docs_in_topk")
+        if isinstance(topk_docs, (int, float)):
+            distinct_docs_topk.append(float(topk_docs))
+        ctx_docs = meta.get("distinct_docs_in_context")
+        if isinstance(ctx_docs, (int, float)):
+            distinct_docs_context.append(float(ctx_docs))
+        same_ratio = meta.get("same_doc_chunk_ratio")
+        if isinstance(same_ratio, (int, float)):
+            same_doc_chunk_ratio_vals.append(float(same_ratio))
+        redun = meta.get("adjacent_chunk_redundancy_rate")
+        if isinstance(redun, (int, float)):
+            adjacent_redundancy_vals.append(float(redun))
+        docs_in_answer = {r.get("file_id") for r in row["refs_slim"] if r.get("file_id") is not None}
+        if len(docs_in_answer) >= 2:
+            multi_source_answers += 1
+        citation_source_diversity_vals.append(float(len(docs_in_answer)))
+        if row.get("answer_source") == "model_general" and len(docs_in_answer) >= 2:
+            unsupported_multi_source += 1
+        tags = sample.get("scenario_tags") or []
+        if isinstance(tags, list) and "single_source_sufficient" in tags:
+            single_source_when_sufficient_eval += 1
+            if len(docs_in_answer) <= 1:
+                single_source_when_sufficient_hits += 1
 
         exp_files = sample.get("expected_file_ids")
         if exp_files:
@@ -236,11 +275,20 @@ def _aggregate_round(
         "latency_p50_ms": _percentile(latencies, 0.5),
         "latency_p95_ms": _percentile(latencies, 0.95),
         "retrieval_strategy_distribution": dict(retrieval_strategy),
+        "distinct_docs_in_topk_mean": (sum(distinct_docs_topk) / len(distinct_docs_topk)) if distinct_docs_topk else None,
+        "distinct_docs_in_context_mean": (sum(distinct_docs_context) / len(distinct_docs_context)) if distinct_docs_context else None,
+        "same_doc_chunk_ratio_mean": (sum(same_doc_chunk_ratio_vals) / len(same_doc_chunk_ratio_vals)) if same_doc_chunk_ratio_vals else None,
+        "adjacent_chunk_redundancy_rate_mean": (sum(adjacent_redundancy_vals) / len(adjacent_redundancy_vals)) if adjacent_redundancy_vals else None,
+        "multi_source_answer_rate": _rate(multi_source_answers, answered),
+        "citation_source_diversity_mean": (sum(citation_source_diversity_vals) / len(citation_source_diversity_vals)) if citation_source_diversity_vals else None,
+        "single_source_when_sufficient_rate": _rate(single_source_when_sufficient_hits, single_source_when_sufficient_eval),
+        "unsupported_multi_source_rate": _rate(unsupported_multi_source, answered),
         "_denoms": {
             "file_evaluated": file_eval,
             "chunk_evaluated": chunk_eval,
             "recall_evaluated": recall_n,
             "keyword_evaluated": kw_eval,
+            "single_source_when_sufficient_evaluated": single_source_when_sufficient_eval,
         },
     }
 
@@ -268,6 +316,14 @@ def _print_summary(label_a: str, m_a: dict[str, Any], label_b: str, m_b: dict[st
         ("mrr_at_top_k", "mrr@top_k"),
         ("ndcg_at_top_k", "ndcg@top_k"),
         ("keyword_hit_rate", "keyword_hit_rate"),
+        ("distinct_docs_in_topk_mean", "distinct_docs_in_topk_mean"),
+        ("distinct_docs_in_context_mean", "distinct_docs_in_context_mean"),
+        ("same_doc_chunk_ratio_mean", "same_doc_chunk_ratio_mean"),
+        ("adjacent_chunk_redundancy_rate_mean", "adjacent_chunk_redundancy_rate_mean"),
+        ("multi_source_answer_rate", "multi_source_answer_rate"),
+        ("citation_source_diversity_mean", "citation_source_diversity_mean"),
+        ("single_source_when_sufficient_rate", "single_source_when_sufficient_rate"),
+        ("unsupported_multi_source_rate", "unsupported_multi_source_rate"),
     ]
     for key, title in keys:
         print(f"  {title}: {label_a}={fmt(m_a.get(key))} | {label_b}={fmt(m_b.get(key))}")
