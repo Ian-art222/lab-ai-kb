@@ -43,11 +43,26 @@ class Settings(BaseSettings):
     qa_max_context_chars: int = 24000
     qa_neighbor_window: int = 1
     qa_dedupe_adjacent_chunks: bool = True
+    qa_retrieval_mode: str = "hybrid"  # semantic | lexical | hybrid
+    qa_semantic_threshold: float = 0.25
+    qa_lexical_threshold: float = 0.012
+    qa_hybrid_threshold: float = 0.012
+    qa_pgvector_retrieval_enabled: bool = True
+    qa_pgvector_probe_limit: int = 256
+    qa_retrieval_log_top_n: int = 5
 
     # Rerank
-    qa_rerank_enabled: bool = False
+    qa_rerank_enabled: bool = True
     qa_rerank_top_n: int = 20
     qa_rerank_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    qa_rerank_latency_budget_ms: int = 1200
+
+    # Query-side enhancement (lightweight and optional)
+    qa_query_expansion_enabled: bool = False
+    qa_query_expansion_max_queries: int = 3
+
+    # Grounding guardrail
+    qa_strict_min_citations: int = 1
 
     # pgvector semantic search (dimension must match migration + DB column; mismatch → in-memory fallback)
     qa_pgvector_semantic_enabled: bool = True

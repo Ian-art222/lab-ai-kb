@@ -55,6 +55,27 @@ EMBED_BATCH_DELAY=0.25
 - 若默认 retrieval embedding 采用 Qwen / DashScope，建议 `EMBED_BATCH_SIZE=10`
 - `EMBED_RETRY_TIMES` / `EMBED_RETRY_BASE_DELAY` / `EMBED_BATCH_DELAY` 用于大文件索引时的最小退避重试与轻量节流
 
+### RAG 工程化关键配置（新增）
+
+以下配置位于 `apps/api/app/core/config.py`，可通过后端环境变量覆盖：
+
+- `QA_RETRIEVAL_MODE`：`semantic | lexical | hybrid`（默认 `hybrid`）
+- `QA_PGVECTOR_RETRIEVAL_ENABLED`：是否启用 pgvector ANN 主链路（默认开启）
+- `QA_PGVECTOR_SEMANTIC_ENABLED`：是否允许走 pgvector 语义检索（默认开启）
+- `QA_PGVECTOR_PROBE_LIMIT`：ANN 粗召回上限（默认 `256`）
+- `QA_SEMANTIC_THRESHOLD` / `QA_LEXICAL_THRESHOLD` / `QA_HYBRID_THRESHOLD`：不同检索模式的证据阈值
+- `QA_RERANK_ENABLED`：是否默认启用 rerank（默认开启，可按环境关闭）
+- `QA_RERANK_TOP_N`：rerank 处理候选上限
+- `QA_RERANK_LATENCY_BUDGET_MS`：rerank 软延迟预算
+- `QA_QUERY_EXPANSION_ENABLED`：是否启用轻量 query expansion（默认关闭）
+- `QA_QUERY_EXPANSION_MAX_QUERIES`：扩展 query 数上限
+- `QA_STRICT_MIN_CITATIONS`：严格模式最低引用条数
+
+说明：
+
+- 当 pgvector 检索不可用（数据库、扩展或查询异常）时，会自动回退到应用层 cosine 检索，保证主链路可用性。
+- 系统日志会记录当前检索策略、召回数量、阈值和 rerank 是否执行，便于回归与排障。
+
 ## 前端环境变量
 
 前端当前支持：
@@ -368,6 +389,8 @@ set LAB_AI_KB_RUN_FULL_FLOW=1
 - `OpenAI` / `Anthropic` 当前仍需真实账号做最终联调
 - `stream / tools / vision` 还未统一
 - 尚未建立 model-level capability 精细能力表
+- 文档解析仅聚焦文本类型：`txt / md / pdf(文本型) / docx`
+- 明确不支持 OCR、图像理解和多模态解析
 
 ## 最小 Smoke 检查
 
