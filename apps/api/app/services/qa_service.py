@@ -122,6 +122,9 @@ def _build_retrieval_meta(
     diversity_rerank_enabled: bool = False,
     diversity_rerank_applied: bool = False,
     diversity_rerank_fetch_k: int = 0,
+    normalized_query: str | None = None,
+    rewritten_queries: list[str] | None = None,
+    abstain_reason: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -165,6 +168,9 @@ def _build_retrieval_meta(
         "diversity_rerank_enabled": diversity_rerank_enabled,
         "diversity_rerank_applied": diversity_rerank_applied,
         "diversity_rerank_fetch_k": diversity_rerank_fetch_k,
+        "normalized_query": normalized_query,
+        "rewritten_queries": rewritten_queries or [],
+        "abstain_reason": abstain_reason,
     }
 
 
@@ -528,6 +534,45 @@ def _pack_context_and_references(
 
     redundancy_rate = suppressed_redundant / considered if considered else 0.0
     return context_blocks, references, used_files, total_chars, len(references), parent_recovered_chunks, redundancy_rate
+
+
+def _assemble_evidence_bundles(references: list[dict]) -> dict:
+    by_file: dict[int, dict] = {}
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        file_id = int(ref.get("file_id", 0))
+        if file_id <= 0:
+            continue
+        bucket = by_file.setdefault(
+            file_id,
+            {
+                "file_id": file_id,
+                "file_name": ref.get("file_name"),
+                "max_score": 0.0,
+                "citations": [],
+            },
+        )
+        score = float(ref.get("score") or 0.0)
+        bucket["max_score"] = max(bucket["max_score"], score)
+        bucket["citations"].append(
+            {
+                "chunk_id": ref.get("chunk_id"),
+                "chunk_index": ref.get("chunk_index"),
+                "section_title": ref.get("section_title"),
+                "page_number": ref.get("page_number"),
+                "score": score,
+            }
+        )
+
+    ranked = sorted(by_file.values(), key=lambda item: item["max_score"], reverse=True)
+    primary = ranked[:2]
+    supplemental = ranked[2:]
+    return {
+        "primary_sources": primary,
+        "supplementary_sources": supplemental,
+        "source_count": len(ranked),
+    }
 
 
 class QAServiceError(Exception):
@@ -1364,6 +1409,7 @@ def ask_question(
     pool_limit = min(QA_RETRIEVAL_POOL_CAP, max(MIN_TOP_K, top_k, candidate_k))
 
     retrieval_mode = _normalize_retrieval_mode(app_settings.qa_retrieval_mode)
+    normalized_query = " ".join((question or "").split()).strip()
     query_variants = _build_query_variants(question)
     try:
         query_embeddings = embed_texts(
@@ -1437,11 +1483,15 @@ def ask_question(
             rerank_applied=False,
             parent_recovered_chunks=0,
             parent_deduped_groups=0,
+            normalized_query=normalized_query,
+            rewritten_queries=query_variants,
+            abstain_reason="no_compatible_content",
         )
         return {
             "answer": answer,
             "references": [],
             "references_json": refs_payload,
+            "evidence_bundles": None,
             "answer_source": "model_general",
             "used_files": [],
             "retrieval_meta": retrieval_meta,
@@ -1631,11 +1681,15 @@ def ask_question(
                 diversity_rerank_enabled=diversity_rerank_enabled,
                 diversity_rerank_applied=diversity_applied,
                 diversity_rerank_fetch_k=diversity_rerank_fetch_k,
+                normalized_query=normalized_query,
+                rewritten_queries=query_variants,
             )
+            evidence_bundles = _assemble_evidence_bundles(references)
             return {
                 "answer": answer,
                 "references": references,
                 "references_json": references,
+                "evidence_bundles": evidence_bundles,
                 "answer_source": "knowledge_base",
                 "used_files": used_files,
                 "retrieval_meta": retrieval_meta,
@@ -1726,11 +1780,15 @@ def ask_question(
                     diversity_rerank_enabled=diversity_rerank_enabled,
                     diversity_rerank_applied=diversity_applied,
                     diversity_rerank_fetch_k=diversity_rerank_fetch_k,
+                    normalized_query=normalized_query,
+                    rewritten_queries=query_variants,
                 )
+                evidence_bundles = _assemble_evidence_bundles(references)
                 return {
                     "answer": answer,
                     "references": references,
                     "references_json": references,
+                    "evidence_bundles": evidence_bundles,
                     "answer_source": "knowledge_base",
                     "used_files": used_files,
                     "retrieval_meta": retrieval_meta,
@@ -1787,11 +1845,15 @@ def ask_question(
             rerank_applied=rerank_applied,
             parent_recovered_chunks=0,
             parent_deduped_groups=0,
+            normalized_query=normalized_query,
+            rewritten_queries=query_variants,
+            abstain_reason=("low_confidence_retrieval" if low_confidence else "no_candidates"),
         )
         return {
             "answer": answer,
             "references": [],
             "references_json": refs_payload,
+            "evidence_bundles": None,
             "answer_source": answer_src,
             "used_files": [],
             "retrieval_meta": retrieval_meta,
