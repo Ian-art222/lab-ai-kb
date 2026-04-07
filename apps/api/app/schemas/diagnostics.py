@@ -26,6 +26,10 @@ class TraceListItem(BaseModel):
     token_usage: dict[str, Any] | None = None
     latency_ms: int | None = None
     latency_breakdown: dict[str, Any] | None = None
+    task_type: str | None = None
+    tool_traces: list[dict[str, Any]] | None = None
+    workflow_steps: list[dict[str, Any]] | None = None
+    session_context: dict[str, Any] | None = None
     created_at: datetime
 
 

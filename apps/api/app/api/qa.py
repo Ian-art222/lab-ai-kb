@@ -90,10 +90,6 @@ def ask_question(
                 "selected_evidence": result.get("references") if isinstance(result.get("references"), list) else [],
                 "evidence_bundles": result.get("evidence_bundles"),
                 "model_name": None,
-                "task_type": "qa",
-                "tool_traces_json": [],
-                "workflow_steps_json": [],
-                "session_context_json": {},
             }
         persist_retrieval_trace(
             db,

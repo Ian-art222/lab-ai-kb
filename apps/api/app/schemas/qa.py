@@ -71,6 +71,13 @@ class RetrievalMetaPayload(BaseModel):
     failure_reason_code: str | None = None
     trace_id: str | None = None
     request_id: str | None = None
+    task_type: str | None = None
+    planner_output: dict[str, Any] | None = None
+    selected_strategy: str | None = None
+    workflow_steps_json: list[dict[str, Any]] | None = None
+    tool_traces_json: list[dict[str, Any]] | None = None
+    session_context_json: dict[str, Any] | None = None
+    final_answer_type: str | None = None
 
 
 class AskSuccessResponse(BaseModel):

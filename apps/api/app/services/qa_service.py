@@ -18,6 +18,15 @@ from app.models.knowledge import KnowledgeChunk, QACitation, QAMessage, QARetrie
 from app.models.system_setting import SystemSetting
 from app.services.failure_cases import build_failure_case, sink_failure_case
 from app.services.model_service import chat_completion, embed_texts
+from app.services.qa_agent_workflow import (
+    TASK_COMPARE,
+    TASK_MULTI_DOC_SYNTHESIS,
+    build_session_context,
+    classify_task_type,
+    extract_compare_targets,
+    plan_retrieval,
+    summarize_tool_trace,
+)
 from app.services.reason_codes import QAReasonCode, normalize_reason_code
 from app.services.settings_service import build_embedding_index_standard
 
@@ -132,6 +141,13 @@ def _build_retrieval_meta(
     failure_reason_code: str | None = None,
     trace_id: str | None = None,
     request_id: str | None = None,
+    task_type: str | None = None,
+    planner_output: dict | None = None,
+    selected_strategy: str | None = None,
+    workflow_steps_json: list | None = None,
+    tool_traces_json: list | None = None,
+    session_context_json: dict | None = None,
+    final_answer_type: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -182,6 +198,13 @@ def _build_retrieval_meta(
         "failure_reason_code": failure_reason_code,
         "trace_id": trace_id,
         "request_id": request_id,
+        "task_type": task_type,
+        "planner_output": planner_output or {},
+        "selected_strategy": selected_strategy,
+        "workflow_steps_json": workflow_steps_json or [],
+        "tool_traces_json": tool_traces_json or [],
+        "session_context_json": session_context_json or {},
+        "final_answer_type": final_answer_type,
     }
 
 
@@ -1423,7 +1446,43 @@ def ask_question(
     normalized_query = " ".join((question or "").split()).strip()
     trace_id = uuid.uuid4().hex
     request_id = uuid.uuid4().hex
-    query_variants = _build_query_variants(question)
+    routing = classify_task_type(question=question, scope_type=scope_type, file_ids=file_ids)
+    task_type = routing["task_type"]
+    compare_targets = extract_compare_targets(question) if task_type == TASK_COMPARE else []
+    planned = plan_retrieval(
+        task_type=task_type,
+        normalized_query=normalized_query,
+        rewritten_queries=_build_query_variants(question),
+        scope_type=scope_type,
+        strict_mode=strict_mode,
+        top_k=top_k,
+        candidate_k=candidate_k,
+        file_ids=file_ids,
+    )
+    query_variants = planned.get("rewritten_queries") or [normalized_query]
+    top_k = max(MIN_TOP_K, min(int(planned.get("top_k", top_k)), MAX_TOP_K))
+    candidate_k = max(1, int(planned.get("candidate_k", candidate_k)))
+    workflow_steps = list(planned.get("workflow_steps") or [])
+    tool_traces = [
+        summarize_tool_trace("classify_task_type", routing),
+        summarize_tool_trace(
+            "plan_retrieval",
+            {
+                "selected_strategy": planned.get("selected_strategy"),
+                "top_k": top_k,
+                "candidate_k": candidate_k,
+                "rewritten_queries": query_variants,
+                "scopes": planned.get("scopes"),
+            },
+        ),
+    ]
+    session_context = build_session_context(
+        scope_type=scope_type,
+        file_ids=file_ids,
+        task_type=task_type,
+        compare_targets=compare_targets,
+        normalized_query=normalized_query,
+    )
     try:
         query_embeddings = embed_texts(
             provider=settings.embedding_provider,
@@ -1502,6 +1561,13 @@ def ask_question(
             abstain_reason_code=QAReasonCode.NO_RETRIEVAL_HIT.value,
             trace_id=trace_id,
             request_id=request_id,
+            task_type=task_type,
+            planner_output=planned,
+            selected_strategy=planned.get("selected_strategy"),
+            workflow_steps_json=workflow_steps,
+            tool_traces_json=tool_traces,
+            session_context_json=session_context,
+            final_answer_type="model_general",
         )
         return {
             "answer": answer,
@@ -1659,6 +1725,10 @@ def ask_question(
                     "NO_RELIABLE_EVIDENCE",
                     "知识库证据不足，严格模式下无法给出可引用回答。",
                 )
+            if task_type == TASK_COMPARE:
+                workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
+            elif task_type == TASK_MULTI_DOC_SYNTHESIS:
+                workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
             logger.info("strict evidence decision=accept citations=%s", len(references))
             retrieval_meta = _build_retrieval_meta(
                 retrieval_strategy=retrieval_strategy,
@@ -1701,6 +1771,13 @@ def ask_question(
                 rewritten_queries=query_variants,
                 trace_id=trace_id,
                 request_id=request_id,
+                task_type=task_type,
+                planner_output=planned,
+                selected_strategy=planned.get("selected_strategy"),
+                workflow_steps_json=workflow_steps,
+                tool_traces_json=tool_traces,
+                session_context_json=session_context,
+                final_answer_type=("compare" if task_type == TASK_COMPARE else "knowledge_base"),
             )
             evidence_bundles = _assemble_evidence_bundles(references)
             return {
@@ -1736,16 +1813,37 @@ def ask_question(
                 redundancy_adjacent_window=redundancy_adjacent_window,
             )
             user_prompt = (
-                "你是实验室知识库问答助手。请优先根据下方「资料片段」回答问题。\n"
-                "要求：\n"
-                "- 当资料足以支撑结论时，以资料为准，回答应体现资料中的要点。\n"
-                "- 若多个来源提供互补证据，优先综合多个来源；避免机械重复同一来源的连续片段。\n"
-                "- 若单一来源已完整覆盖问题，可直接基于该来源回答。\n"
-                "- 若资料仅有部分相关信息，可先说明资料中的依据，再在必要时少量结合常识补充，"
-                "但不要与资料矛盾，也不要虚构资料中不存在的内容或引用。\n"
-                "- 若资料明显不足以判断用户问题，请说明资料局限，不要假装资料已覆盖。\n\n"
-                f"问题：{question}\n\n资料片段：\n"
-                + "\n\n".join(context_blocks)
+                (
+                    "你是实验室知识库问答助手。请做多来源综合并保留引用意识。\n"
+                    "要求：\n"
+                    "- 先按主题归纳关键信息，再给总结。\n"
+                    "- 关键结论必须由资料支撑；若证据冲突，要明确指出冲突。\n"
+                    "- 若证据不足，明确说明局限并保守回答。\n\n"
+                    f"问题：{question}\n\n资料片段：\n"
+                    + "\n\n".join(context_blocks)
+                )
+                if task_type == TASK_MULTI_DOC_SYNTHESIS
+                else (
+                    "你是实验室知识库比较助手。请基于资料输出结构化比较。\n"
+                    "输出格式：\n"
+                    "1) 比较对象\n2) 共同点\n3) 差异点\n4) 冲突点/证据不足\n5) 结论\n"
+                    "要求：仅依据资料，不要臆测。\n\n"
+                    f"问题：{question}\n\n资料片段：\n"
+                    + "\n\n".join(context_blocks)
+                )
+                if task_type == TASK_COMPARE
+                else (
+                    "你是实验室知识库问答助手。请优先根据下方「资料片段」回答问题。\n"
+                    "要求：\n"
+                    "- 当资料足以支撑结论时，以资料为准，回答应体现资料中的要点。\n"
+                    "- 若多个来源提供互补证据，优先综合多个来源；避免机械重复同一来源的连续片段。\n"
+                    "- 若单一来源已完整覆盖问题，可直接基于该来源回答。\n"
+                    "- 若资料仅有部分相关信息，可先说明资料中的依据，再在必要时少量结合常识补充，"
+                    "但不要与资料矛盾，也不要虚构资料中不存在的内容或引用。\n"
+                    "- 若资料明显不足以判断用户问题，请说明资料局限，不要假装资料已覆盖。\n\n"
+                    f"问题：{question}\n\n资料片段：\n"
+                    + "\n\n".join(context_blocks)
+                )
             )
             system_msg = (
                 "你优先依据用户提供的知识库资料作答；仅在资料边界清晰的前提下可谨慎补充常识，不伪造知识库内容。"
@@ -1761,6 +1859,10 @@ def ask_question(
                 reliable_matches = []
             else:
                 logger.info("non-strict evidence decision=accept citations=%s", len(references))
+                if task_type == TASK_COMPARE:
+                    workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
+                elif task_type == TASK_MULTI_DOC_SYNTHESIS:
+                    workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
                 retrieval_meta = _build_retrieval_meta(
                     retrieval_strategy=retrieval_strategy,
                     answer_source="knowledge_base",
@@ -1802,6 +1904,13 @@ def ask_question(
                     rewritten_queries=query_variants,
                     trace_id=trace_id,
                     request_id=request_id,
+                    task_type=task_type,
+                    planner_output=planned,
+                    selected_strategy=planned.get("selected_strategy"),
+                    workflow_steps_json=workflow_steps,
+                    tool_traces_json=tool_traces,
+                    session_context_json=session_context,
+                    final_answer_type=("compare" if task_type == TASK_COMPARE else "knowledge_base"),
                 )
                 evidence_bundles = _assemble_evidence_bundles(references)
                 return {
@@ -1873,6 +1982,13 @@ def ask_question(
             ),
             trace_id=trace_id,
             request_id=request_id,
+            task_type=task_type,
+            planner_output=planned,
+            selected_strategy=planned.get("selected_strategy"),
+            workflow_steps_json=workflow_steps,
+            tool_traces_json=tool_traces,
+            session_context_json=session_context,
+            final_answer_type=answer_src,
         )
         return {
             "answer": answer,
