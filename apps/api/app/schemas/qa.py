@@ -67,6 +67,10 @@ class RetrievalMetaPayload(BaseModel):
     normalized_query: str | None = None
     rewritten_queries: list[str] | None = None
     abstain_reason: str | None = None
+    abstain_reason_code: str | None = None
+    failure_reason_code: str | None = None
+    trace_id: str | None = None
+    request_id: str | None = None
 
 
 class AskSuccessResponse(BaseModel):
