@@ -1,6 +1,6 @@
 <template>
   <div class="admin-layout">
-    <div class="layout-shell" @mousemove="handleBoundaryHover">
+    <div class="layout-shell" @mousemove="onLayoutMouseMove">
       <aside
         class="sidebar"
         :class="{ collapsed: sidebarCollapsed, floating: autoCollapseEnabled }"
@@ -9,18 +9,19 @@
       >
         <div class="brand-block">
           <div class="brand-mark">LK</div>
-          <transition name="fade-slide">
-            <div v-if="!sidebarCollapsed" class="brand-text">
+          <div class="brand-text-clip" :class="{ 'is-collapsed': sidebarCollapsed }">
+            <div class="brand-text">
               <div class="brand-title">{{ systemStore.systemName }}</div>
               <div class="brand-subtitle">{{ systemStore.labName }}</div>
             </div>
-          </transition>
+          </div>
         </div>
 
         <el-menu
           router
           :default-active="$route.path"
           :collapse="sidebarCollapsed"
+          :collapse-transition="true"
           class="sidebar-menu"
         >
           <el-menu-item index="/">
@@ -129,14 +130,19 @@ const handleSidebarLeave = () => {
   clearCollapseTimer()
   collapseTimer = window.setTimeout(() => {
     sidebarCollapsed.value = true
-  }, 360)
+  }, 440)
 }
 
-const handleBoundaryHover = (event: MouseEvent) => {
-  if (!autoCollapseEnabled.value) return
-  if (sidebarCollapsed.value && event.clientX <= 10) {
+let boundaryRaf = 0
+const onLayoutMouseMove = (event: MouseEvent) => {
+  if (!autoCollapseEnabled.value || !sidebarCollapsed.value) return
+  if (event.clientX > 14) return
+  if (boundaryRaf) return
+  boundaryRaf = window.requestAnimationFrame(() => {
+    boundaryRaf = 0
+    if (!autoCollapseEnabled.value || !sidebarCollapsed.value) return
     sidebarCollapsed.value = false
-  }
+  })
 }
 
 const toggleSidebarMode = () => {
@@ -177,6 +183,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearCollapseTimer()
+  if (boundaryRaf) {
+    window.cancelAnimationFrame(boundaryRaf)
+    boundaryRaf = 0
+  }
 })
 </script>
 
@@ -193,20 +203,25 @@ onBeforeUnmount(() => {
 }
 
 .sidebar {
+  --sidebar-transition-duration: 0.42s;
+  --sidebar-transition-ease: cubic-bezier(0.33, 1, 0.68, 1);
   width: 256px;
-  background: linear-gradient(180deg, #fff7f1 0%, #fff3ea 100%);
+  flex-shrink: 0;
+  background: linear-gradient(180deg, #fff6ee 0%, #ffefe4 100%);
   border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  padding: 18px 14px;
-  transition: width 0.24s ease, transform 0.24s ease, box-shadow 0.24s ease;
+  padding: 18px 12px;
+  overflow: hidden;
+  transition:
+    width var(--sidebar-transition-duration) var(--sidebar-transition-ease),
+    box-shadow 0.35s ease;
   box-shadow: var(--soft-shadow);
   z-index: 10;
 }
 
 .sidebar.collapsed {
   width: 84px;
-  padding-inline: 10px;
 }
 
 .sidebar.floating.collapsed {
@@ -216,8 +231,31 @@ onBeforeUnmount(() => {
 .brand-block {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 6px 18px;
+  gap: 10px;
+  padding: 6px 4px 18px;
+  min-height: 56px;
+}
+
+.brand-text-clip {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  max-width: 220px;
+  opacity: 1;
+  transition:
+    max-width var(--sidebar-transition-duration) var(--sidebar-transition-ease),
+    opacity 0.28s ease;
+}
+
+.brand-text-clip.is-collapsed {
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.brand-text {
+  white-space: nowrap;
+  padding-right: 4px;
 }
 
 .brand-mark {
@@ -259,12 +297,20 @@ onBeforeUnmount(() => {
 }
 
 :deep(.sidebar-menu .el-menu-item.is-active) {
-  background: rgba(255, 153, 102, 0.16);
-  color: #c85f26;
+  background: rgba(240, 170, 120, 0.22);
+  color: #a14f22;
 }
 
 :deep(.sidebar-menu .el-menu-item:hover) {
-  background: rgba(255, 170, 120, 0.12);
+  background: rgba(255, 188, 140, 0.14);
+}
+
+/* 与侧栏 width 动画对齐，减轻菜单与外壳「各动各的」的顿挫感 */
+.sidebar :deep(.horizontal-collapse-transition) {
+  transition:
+    width var(--sidebar-transition-duration) var(--sidebar-transition-ease),
+    padding-left var(--sidebar-transition-duration) var(--sidebar-transition-ease),
+    padding-right var(--sidebar-transition-duration) var(--sidebar-transition-ease) !important;
 }
 
 .sidebar-footer {
@@ -275,10 +321,16 @@ onBeforeUnmount(() => {
 }
 
 .side-action {
-  border: none;
+  border: 1px solid rgba(230, 195, 170, 0.55);
+  background: rgba(255, 252, 248, 0.95);
+  color: #b55f28;
+  box-shadow: 0 2px 10px rgba(200, 140, 95, 0.08);
+}
+
+.side-action:hover {
+  border-color: rgba(215, 170, 130, 0.65);
+  color: #9c4f1c;
   background: #fff;
-  color: #c96b2d;
-  box-shadow: var(--soft-shadow);
 }
 
 .main-shell {
@@ -294,7 +346,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 16px;
   padding: 18px 24px;
-  background: linear-gradient(135deg, rgba(255, 242, 228, 0.92), rgba(255, 250, 245, 0.98));
+  background: linear-gradient(135deg, rgba(255, 244, 232, 0.96), rgba(255, 250, 244, 0.99));
   border-bottom: 1px solid var(--border-color);
   backdrop-filter: blur(10px);
 }
@@ -320,14 +372,25 @@ onBeforeUnmount(() => {
 
 .role-tag {
   border-radius: 999px;
+  border-color: rgba(220, 185, 155, 0.45) !important;
 }
 
 .username-text {
   color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .logout-btn {
   border-radius: 999px;
+  border: 1px solid rgba(215, 175, 145, 0.5);
+  background: rgba(255, 252, 248, 0.95);
+  color: var(--text-primary);
+}
+
+.logout-btn:hover {
+  border-color: rgba(200, 155, 115, 0.6);
+  background: #fff;
+  color: var(--warm-accent, #d97a3e);
 }
 
 .page-main {
@@ -336,14 +399,4 @@ onBeforeUnmount(() => {
   background: var(--app-bg);
 }
 
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: all 0.18s ease;
-}
-
-.fade-slide-enter-from,
-.fade-slide-leave-to {
-  opacity: 0;
-  transform: translateX(-8px);
-}
 </style>

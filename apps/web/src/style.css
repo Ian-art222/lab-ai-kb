@@ -1,18 +1,25 @@
 :root {
   --app-bg: linear-gradient(180deg, #fffaf6 0%, #fff4eb 100%);
   --surface-bg: #fffdfb;
-  --card-bg: rgba(255, 255, 255, 0.88);
-  --border-color: #f1d8c8;
-  --text-primary: #5e3420;
-  --text-secondary: #9b6f58;
-  --warm-primary: #ef8f55;
-  --warm-primary-soft: #fff0e6;
-  --warm-gradient: linear-gradient(135deg, #ffb36a 0%, #ff8a65 50%, #f77f73 100%);
-  --success-color: #67c23a;
-  --warning-color: #e6a23c;
-  --danger-color: #f56c6c;
+  --card-bg: rgba(255, 255, 255, 0.92);
+  --border-color: #edd4c4;
+  --text-primary: #5c3824;
+  --text-secondary: #96725f;
+  --warm-primary: #e8894a;
+  --warm-primary-soft: #fff1e6;
+  --warm-accent: #d97a3e;
+  --warm-bg-muted: #f7efe6;
+  --warm-bg-chat: #f9f3ec;
+  --warm-border-subtle: #e8d5c8;
+  --warm-shadow: rgba(180, 120, 80, 0.09);
+  --warm-gradient: linear-gradient(135deg, #f0a868 0%, #e8895c 50%, #e0786a 100%);
+  --success-color: #7d9a6b;
+  --warning-color: #d4a05c;
+  --danger-color: #e07060;
   --card-radius: 18px;
-  --soft-shadow: 0 10px 30px rgba(226, 146, 97, 0.12);
+  --soft-shadow: 0 8px 28px rgba(200, 140, 95, 0.11);
+  --sidebar-transition-duration: 0.42s;
+  --sidebar-transition-ease: cubic-bezier(0.33, 1, 0.68, 1);
 }
 
 * {
@@ -30,7 +37,7 @@ body,
 
 body {
   font-family: Arial, "Microsoft YaHei", sans-serif;
-  background: #fff8f3;
+  background: #fdf6f0;
   color: var(--text-primary);
 }
 
@@ -85,6 +92,25 @@ a {
 
 .el-tag {
   border-radius: 999px !important;
+}
+
+/* 柔和暖色语义标签（全站收敛冷绿/冷蓝） */
+.el-tag.el-tag--success {
+  --el-tag-bg-color: rgba(255, 243, 230, 0.95);
+  --el-tag-border-color: rgba(220, 180, 140, 0.5);
+  --el-tag-text-color: #6b4a30;
+}
+
+.el-tag.el-tag--info {
+  --el-tag-bg-color: rgba(252, 238, 228, 0.95);
+  --el-tag-border-color: rgba(218, 195, 175, 0.48);
+  --el-tag-text-color: #6a5244;
+}
+
+.el-tag.el-tag--warning {
+  --el-tag-bg-color: rgba(255, 238, 212, 0.95);
+  --el-tag-border-color: rgba(228, 185, 125, 0.48);
+  --el-tag-text-color: #7a5220;
 }
 
 .el-table {

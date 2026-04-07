@@ -1,22 +1,312 @@
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.core.config import settings as app_settings
 from app.models.file_record import FileRecord
 from app.models.folder import Folder
-from app.models.knowledge import KnowledgeChunk, QAMessage, QASession
+from app.models.knowledge import KnowledgeChunk, QACitation, QAMessage, QARetrievalTrace, QASession
 from app.models.system_setting import SystemSetting
 from app.services.model_service import chat_completion, embed_texts
 from app.services.settings_service import build_embedding_index_standard
 
 MIN_SIMILARITY_SCORE = 0.25
+MIN_HYBRID_RRF_SCORE = 0.012
 MAX_TOP_K = 8
 MIN_TOP_K = 1
 MIN_RETRIEVAL_CHUNK_CHARS = 60
 SNIPPET_TRUNCATE_LENGTH = 220
+
+logger = logging.getLogger(__name__)
+
+# Fixed label for clients; describes in-process cosine over stored embeddings (no DB ANN).
+RETRIEVAL_STRATEGY = "app_layer_cosine_topk"
+
+# Upper bound for in-memory ranked pool (top_k vs qa_candidate_k); avoids unbounded scans.
+QA_RETRIEVAL_POOL_CAP = 128
+
+
+def _child_or_legacy_retrieval_filter():
+    """Recall child rows; NULL chunk_kind keeps legacy chunks indexed before parent-child."""
+    return or_(KnowledgeChunk.chunk_kind == "child", KnowledgeChunk.chunk_kind.is_(None))
+
+
+def _build_retrieval_meta(
+    *,
+    answer_source: str,
+    scope_type: str,
+    strict_mode: bool,
+    top_k: int,
+    compatible_file_count: int,
+    candidate_chunks: int,
+    matched_chunks: int,
+    selected_chunks: int,
+    used_file_ids: list[int],
+    candidate_k: int,
+    expanded_chunks: int,
+    packed_chunks: int,
+    context_chars: int,
+    neighbor_window: int,
+    dedupe_adjacent_chunks: bool,
+    retrieval_mode: str,
+    semantic_candidate_count: int,
+    lexical_candidate_count: int,
+    fusion_method: str,
+    score_threshold_applied: float,
+    rerank_enabled: bool,
+    rerank_input_count: int,
+    rerank_output_count: int,
+    rerank_model_name: str,
+    rerank_applied: bool,
+    parent_recovered_chunks: int = 0,
+    parent_deduped_groups: int = 0,
+) -> dict:
+    """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
+    return {
+        "retrieval_strategy": RETRIEVAL_STRATEGY,
+        "answer_source": answer_source,
+        "scope_type": scope_type,
+        "strict_mode": strict_mode,
+        "top_k": top_k,
+        "min_similarity_score": MIN_SIMILARITY_SCORE,
+        "candidate_chunks": candidate_chunks,
+        "matched_chunks": matched_chunks,
+        # Final chunks actually concatenated into the LLM context (same as packed_chunks when packing runs).
+        "selected_chunks": selected_chunks,
+        "compatible_file_count": compatible_file_count,
+        "used_file_ids": used_file_ids,
+        # Legacy field name (same value as min_similarity_score)
+        "min_score": MIN_SIMILARITY_SCORE,
+        "candidate_k": candidate_k,
+        "expanded_chunks": expanded_chunks,
+        "packed_chunks": packed_chunks,
+        "context_chars": context_chars,
+        "neighbor_window": neighbor_window,
+        "dedupe_adjacent_chunks": dedupe_adjacent_chunks,
+        "retrieval_mode": retrieval_mode,
+        "semantic_candidate_count": semantic_candidate_count,
+        "lexical_candidate_count": lexical_candidate_count,
+        "fusion_method": fusion_method,
+        "score_threshold_applied": score_threshold_applied,
+        "rerank_enabled": rerank_enabled,
+        "rerank_input_count": rerank_input_count,
+        "rerank_output_count": rerank_output_count,
+        "rerank_model_name": rerank_model_name,
+        "rerank_applied": rerank_applied,
+        "parent_recovered_chunks": parent_recovered_chunks,
+        "parent_deduped_groups": parent_deduped_groups,
+    }
+
+
+def _truncate_ranked_to_candidate_k(ranked: list[dict], candidate_k: int) -> list[dict]:
+    """Take the first candidate_k items from an already score-sorted ranked list."""
+    if candidate_k < 1:
+        return []
+    return ranked[:candidate_k]
+
+
+def _neighbor_score_from_seed(seed_score: float, index_distance: int) -> float:
+    if index_distance <= 0:
+        return seed_score
+    return seed_score * (0.01 / (1 + abs(index_distance)))
+
+
+def _score_neighbor_chunk(chunk: KnowledgeChunk, seeds: list[dict]) -> float:
+    best = 0.0
+    for item in seeds:
+        sch = item["chunk"]
+        if sch.file_id != chunk.file_id:
+            continue
+        dist = abs(chunk.chunk_index - sch.chunk_index)
+        s = _neighbor_score_from_seed(item["score"], dist)
+        if s > best:
+            best = s
+    return best
+
+
+def _expand_neighbor_chunks(db: Session, seeds: list[dict], neighbor_window: int) -> list[dict]:
+    """Load same-file chunks within ±neighbor_window of each seed chunk_index; seeds keep original scores."""
+    if neighbor_window <= 0 or not seeds:
+        return list(seeds)
+
+    needed: dict[int, set[int]] = {}
+    seed_ids = {item["chunk"].id for item in seeds}
+    for item in seeds:
+        ch = item["chunk"]
+        lo = max(0, ch.chunk_index - neighbor_window)
+        hi = ch.chunk_index + neighbor_window
+        needed.setdefault(ch.file_id, set()).update(range(lo, hi + 1))
+
+    by_id: dict[int, dict] = {}
+    for item in seeds:
+        by_id[item["chunk"].id] = {
+            "chunk": item["chunk"],
+            "file_name": item["file_name"],
+            "folder_id": item.get("folder_id"),
+            "score": item["score"],
+        }
+
+    for file_id, idxs in needed.items():
+        rows = (
+            db.query(KnowledgeChunk, FileRecord.file_name, FileRecord.folder_id)
+            .join(FileRecord, KnowledgeChunk.file_id == FileRecord.id)
+            .filter(KnowledgeChunk.file_id == file_id, KnowledgeChunk.chunk_index.in_(idxs))
+            .filter(_child_or_legacy_retrieval_filter())
+            .all()
+        )
+        for chunk, file_name, folder_id in rows:
+            if chunk.id in by_id:
+                continue
+            by_id[chunk.id] = {
+                "chunk": chunk,
+                "file_name": file_name,
+                "folder_id": folder_id,
+                "score": _score_neighbor_chunk(chunk, seeds),
+            }
+
+    seed_order = [item["chunk"].id for item in seeds]
+    rest = [cid for cid in by_id if cid not in seed_ids]
+    rest_sorted = sorted(
+        rest,
+        key=lambda cid: (by_id[cid]["chunk"].file_id, by_id[cid]["chunk"].chunk_index),
+    )
+    ordered_ids = seed_order + rest_sorted
+    return [by_id[cid] for cid in ordered_ids if cid in by_id]
+
+
+def _dedupe_chunk_items(items: list[dict]) -> list[dict]:
+    """Deduplicate by chunk.id; on conflict keep the highest score; preserve first-seen order."""
+    best: dict[int, dict] = {}
+    order: list[int] = []
+    for item in items:
+        cid = item["chunk"].id
+        if cid not in best:
+            best[cid] = item
+            order.append(cid)
+        elif item["score"] > best[cid]["score"]:
+            best[cid] = item
+    return [best[cid] for cid in order]
+
+
+def _recover_parent_context_for_packing(
+    db: Session,
+    items: list[dict],
+) -> tuple[list[dict], int]:
+    """Merge siblings under same parent for packing; batch-load parents; set _pack_text / _used_parent_for_pack.
+
+    Returns (items_for_packer, parent_deduped_groups). References still use child chunk from each kept item.
+    """
+    if not items:
+        return [], 0
+    winners: dict[tuple[str, int], dict] = {}
+    for item in items:
+        ch = item["chunk"]
+        pid = getattr(ch, "parent_chunk_id", None)
+        key: tuple[str, int] = ("p", int(pid)) if pid is not None else ("c", int(ch.id))
+        if key not in winners or item["score"] > winners[key]["score"]:
+            winners[key] = item
+    seen: set[tuple[str, int]] = set()
+    out: list[dict] = []
+    for item in items:
+        ch = item["chunk"]
+        pid = getattr(ch, "parent_chunk_id", None)
+        key = ("p", int(pid)) if pid is not None else ("c", int(ch.id))
+        win = winners[key]
+        if win is not item:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(win)
+    parent_deduped_groups = len(out)
+    parent_ids = {getattr(it["chunk"], "parent_chunk_id", None) for it in out}
+    parent_ids.discard(None)
+    parents: dict[int, KnowledgeChunk] = {}
+    if parent_ids:
+        for row in db.query(KnowledgeChunk).filter(KnowledgeChunk.id.in_(parent_ids)).all():
+            parents[row.id] = row
+    for it in out:
+        ch = it["chunk"]
+        pid = getattr(ch, "parent_chunk_id", None)
+        use_parent = False
+        body = ch.content or ""
+        if pid is not None:
+            par = parents.get(int(pid))
+            if par is not None and (par.content or "").strip():
+                body = par.content
+                use_parent = True
+        it["_pack_text"] = body
+        it["_used_parent_for_pack"] = use_parent
+    return out, parent_deduped_groups
+
+
+def _pack_context_and_references(
+    items: list[dict],
+    *,
+    seed_chunk_ids: set[int],
+    max_context_chars: int,
+    dedupe_adjacent_chunks: bool,
+) -> tuple[list[str], list[dict], list[int], int, int, int]:
+    """
+    Greedy pack into max_context_chars. Prioritize seed hits (then by score, file, chunk_index).
+    If item has _pack_text (parent recovery), use it for the LLM block body; references stay on child chunk.
+    Returns context_blocks, references, used_files, context_chars, packed_chunks, parent_recovered_chunks.
+    """
+    if max_context_chars < 1:
+        return [], [], [], 0, 0, 0
+
+    def sort_key(it: dict) -> tuple:
+        cid = it["chunk"].id
+        is_seed = 1 if cid in seed_chunk_ids else 0
+        return (-is_seed, -it["score"], it["chunk"].file_id, it["chunk"].chunk_index)
+
+    sorted_items = sorted(items, key=sort_key)
+    context_blocks: list[str] = []
+    references: list[dict] = []
+    used_files: list[int] = []
+    total_chars = 0
+    last_content_norm: str | None = None
+    parent_recovered_chunks = 0
+
+    for item in sorted_items:
+        chunk = item["chunk"]
+        body = item.get("_pack_text")
+        if body is None:
+            body = chunk.content
+        block = f"[文件: {item['file_name']} | chunk: {chunk.chunk_index}]\n{body}"
+        sep = "\n\n" if context_blocks else ""
+        add_len = len(sep) + len(block)
+        if total_chars + add_len > max_context_chars:
+            break
+        content_norm = body.strip()
+        if dedupe_adjacent_chunks and last_content_norm is not None and content_norm == last_content_norm:
+            continue
+        context_blocks.append(block)
+        if item.get("_used_parent_for_pack"):
+            parent_recovered_chunks += 1
+        references.append(
+            {
+                "file_id": chunk.file_id,
+                "file_name": item["file_name"],
+                "chunk_id": chunk.id,
+                "chunk_index": chunk.chunk_index,
+                "snippet": _build_snippet(chunk.content),
+                "score": item["score"],
+                "section_title": chunk.section_title,
+                "page_number": chunk.page_number,
+            }
+        )
+        if chunk.file_id not in used_files:
+            used_files.append(chunk.file_id)
+        total_chars += add_len
+        last_content_norm = content_norm
+
+    return context_blocks, references, used_files, total_chars, len(references), parent_recovered_chunks
 
 
 class QAServiceError(Exception):
@@ -68,7 +358,7 @@ def append_qa_messages(
     session_id: int,
     question: str,
     answer: str,
-    references: list[dict],
+    references_json: list[dict] | dict | None,
 ) -> tuple[QAMessage, QAMessage]:
     now = datetime.utcnow()
     user_message = QAMessage(
@@ -82,7 +372,7 @@ def append_qa_messages(
         session_id=session_id,
         role="assistant",
         content=answer,
-        references_json=references,
+        references_json=references_json,
         created_at=now,
     )
     db.add(user_message)
@@ -338,6 +628,7 @@ def _collect_retrievable_file_ids(
     retrievable_ids = (
         db.query(KnowledgeChunk.file_id)
         .filter(KnowledgeChunk.file_id.in_(compatible_indexed_file_ids))
+        .filter(_child_or_legacy_retrieval_filter())
         .filter(KnowledgeChunk.embedding.is_not(None))
         .filter(KnowledgeChunk.token_count.is_not(None))
         .filter(KnowledgeChunk.token_count >= MIN_RETRIEVAL_CHUNK_CHARS)
@@ -365,6 +656,7 @@ def _retrieve_chunks(
         db.query(KnowledgeChunk, FileRecord.file_name, FileRecord.folder_id)
         .join(FileRecord, KnowledgeChunk.file_id == FileRecord.id)
         .filter(KnowledgeChunk.file_id.in_(compatible_file_ids))
+        .filter(_child_or_legacy_retrieval_filter())
         .filter(KnowledgeChunk.embedding.is_not(None))
         .filter(KnowledgeChunk.token_count.is_not(None))
         .filter(KnowledgeChunk.token_count >= MIN_RETRIEVAL_CHUNK_CHARS)
@@ -396,6 +688,286 @@ def _retrieve_chunks(
     ranked.sort(key=lambda item: item["score"], reverse=True)
     return ranked[:top_k]
 
+
+def _semantic_retrieval(
+    db: Session,
+    *,
+    query_embedding: list[float],
+    compatible_file_ids: list[int],
+    top_k: int,
+) -> list[dict]:
+    """Semantic (vector) retrieval; delegates to existing _retrieve_chunks."""
+    return _retrieve_chunks(
+        db,
+        query_embedding=query_embedding,
+        compatible_file_ids=compatible_file_ids,
+        top_k=top_k,
+    )
+
+
+def _lexical_retrieval(
+    db: Session,
+    *,
+    question: str,
+    compatible_file_ids: list[int],
+    top_k: int,
+) -> list[dict]:
+    """Lexical retrieval via PostgreSQL FTS.
+
+    Priority:
+    1. KnowledgeChunk.search_vector @@ websearch_to_tsquery (uses GIN index)
+    2. Fallback: inline to_tsvector(content) @@ websearch_to_tsquery
+    """
+    if not compatible_file_ids or not question or not question.strip():
+        return []
+
+    def _do_query(tsvector_expr) -> list[dict]:
+        query = (
+            db.query(KnowledgeChunk, FileRecord.file_name, FileRecord.folder_id)
+            .join(FileRecord, KnowledgeChunk.file_id == FileRecord.id)
+            .filter(KnowledgeChunk.file_id.in_(compatible_file_ids))
+            .filter(_child_or_legacy_retrieval_filter())
+            .filter(
+                tsvector_expr.op("@@")(
+                    func.websearch_to_tsquery("simple", question)
+                )
+            )
+            .order_by(KnowledgeChunk.id.asc())
+            .limit(top_k)
+        )
+
+        ranked: list[dict] = []
+        for chunk, file_name, folder_id in query.all():
+            ranked.append(
+                {
+                    "chunk": chunk,
+                    "file_name": file_name,
+                    "folder_id": folder_id,
+                    # Lightweight lexical score; NOT comparable to semantic cosine.
+                    # RRF fusion normalizes by rank, so absolute value doesn't matter.
+                    "score": 1.0,
+                }
+            )
+        return ranked
+
+    # 1) Prefer search_vector (indexed GIN column)
+    try:
+        result = _do_query(KnowledgeChunk.search_vector)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+
+    # 2) Fallback: inline to_tsvector(content)
+    try:
+        return _do_query(
+            func.to_tsvector(
+                "simple",
+                func.coalesce(KnowledgeChunk.content, ""),
+            )
+        )
+    except Exception:
+        return []
+
+
+_RRF_K = 60
+
+
+def _dedup_key(item: dict) -> int:
+    """Primary dedup by chunk.id; fallback to (file_id, chunk_index) composite."""
+    chunk = item["chunk"]
+    return chunk.id
+
+
+def _fuse_retrieval_results(
+    semantic_matches: list[dict],
+    lexical_matches: list[dict],
+) -> list[dict]:
+    """Fuse semantic and lexical ranked lists via RRF (Reciprocal Rank Fusion).
+
+    rrf_score = sum(1 / (k + rank))  for each list where the chunk appears.
+    k = _RRF_K (60).  Rank is 1-based.
+    """
+    if not semantic_matches and not lexical_matches:
+        return []
+    if not semantic_matches:
+        fused = _apply_rrf_to_single_list(lexical_matches)
+        return fused
+    if not lexical_matches:
+        fused = _apply_rrf_to_single_list(semantic_matches)
+        return fused
+
+    # Both non-empty → full RRF fusion.
+    scores: dict[int, float] = {}
+    sources: dict[int, set[str]] = {}
+    items: dict[int, dict] = {}
+
+    for rank, item in enumerate(semantic_matches, start=1):
+        key = _dedup_key(item)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+        sources.setdefault(key, set()).add("semantic")
+        if key not in items:
+            items[key] = {
+                "chunk": item["chunk"],
+                "file_name": item["file_name"],
+                "folder_id": item["folder_id"],
+                "score": 0.0,
+                "source": "",
+            }
+
+    for rank, item in enumerate(lexical_matches, start=1):
+        key = _dedup_key(item)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+        sources.setdefault(key, set()).add("lexical")
+        if key not in items:
+            items[key] = {
+                "chunk": item["chunk"],
+                "file_name": item["file_name"],
+                "folder_id": item["folder_id"],
+                "score": 0.0,
+                "source": "",
+            }
+
+    for key in items:
+        src = sources.get(key, set())
+        if src == {"semantic", "lexical"}:
+            source_tag = "hybrid"
+        elif "semantic" in src:
+            source_tag = "semantic"
+        else:
+            source_tag = "lexical"
+        items[key]["score"] = scores[key]
+        items[key]["source"] = source_tag
+
+    fused = list(items.values())
+    fused.sort(key=lambda it: it["score"], reverse=True)
+    return fused
+
+
+def _apply_rrf_to_single_list(matches: list[dict]) -> list[dict]:
+    """When only one list exists, assign RRF scores so downstream logic stays uniform."""
+    source_tag = "semantic" if matches and _is_semantic(matches[0]) else "lexical"
+    result = []
+    for rank, item in enumerate(matches, start=1):
+        result.append({
+            "chunk": item["chunk"],
+            "file_name": item["file_name"],
+            "folder_id": item["folder_id"],
+            "score": 1.0 / (_RRF_K + rank),
+            "source": source_tag,
+        })
+    return result
+
+
+def _is_semantic(item: dict) -> bool:
+    """Heuristic to tag source when only one list is present."""
+    return "source" in item and item["source"] == "semantic"
+
+
+def _rerank_matches(
+    matches: list[dict],
+    *,
+    question: str,
+    rerank_enabled: bool,
+    rerank_top_n: int,
+    rerank_model_name: str,
+) -> tuple[list[dict], bool]:
+    """Rerank fused matches using a local cross-encoder.
+
+    Returns (reranked_matches, rerank_applied).
+    - If rerank_enabled is False, returns (matches, False).
+    - If model load or scoring fails, falls back to (matches, False).
+    """
+    if not rerank_enabled or not matches or not question.strip():
+        return list(matches), False
+
+    try:
+        from sentence_transformers import CrossEncoder  # noqa: PLC0415
+    except ImportError:
+        logger.info("sentence-transformers not installed; skipping rerank")
+        return list(matches), False
+
+    # Module-level model cache
+    if not hasattr(_rerank_matches, "_model_cache"):
+        _rerank_matches._model_cache = {}  # type: ignore[attr-defined]
+        _rerank_matches._model_lock = False  # type: ignore[attr-defined]
+
+    cache = _rerank_matches._model_cache
+    model = cache.get(rerank_model_name)
+    if model is None:
+        try:
+            model = CrossEncoder(rerank_model_name, max_length=512)
+            cache[rerank_model_name] = model
+        except Exception:
+            logger.exception("Failed to load rerank model '%s'", rerank_model_name)
+            return list(matches), False
+
+    # Only rerank the top rerank_top_n candidates
+    top_n = max(1, rerank_top_n)
+    rerank_candidates = matches[:top_n]
+    rest = matches[top_n:]
+
+    try:
+        sentence_pairs = [
+            (question, item["chunk"].content or "")
+            for item in rerank_candidates
+        ]
+        scores = model.predict(sentence_pairs, show_progress_bar=False)
+    except Exception:
+        logger.exception("Rerank scoring failed for model '%s'", rerank_model_name)
+        return list(matches), False
+
+    for item, s in zip(rerank_candidates, scores):
+        item["rerank_score"] = float(s)
+
+    rerank_candidates.sort(key=lambda it: it.get("rerank_score", 0.0), reverse=True)
+    rerank_candidates.sort(key=lambda it: it.get("rerank_score", 0.0), reverse=True)
+
+    return rerank_candidates + rest, True
+
+
+MODEL_NON_KB_PREFIX = "以下内容不基于知识库\n\n"
+
+
+def _build_context_from_matches(items: list[dict]) -> tuple[list[str], list[dict], list[int]]:
+    context_blocks: list[str] = []
+    references: list[dict] = []
+    used_files: list[int] = []
+    for item in items:
+        chunk = item["chunk"]
+        context_blocks.append(
+            f"[文件: {item['file_name']} | chunk: {chunk.chunk_index}]\n{chunk.content}"
+        )
+        references.append(
+            {
+                "file_id": chunk.file_id,
+                "file_name": item["file_name"],
+                "chunk_id": chunk.id,
+                "chunk_index": chunk.chunk_index,
+                "snippet": _build_snippet(chunk.content),
+                "score": item["score"],
+                "section_title": chunk.section_title,
+                "page_number": chunk.page_number,
+            }
+        )
+        if chunk.file_id not in used_files:
+            used_files.append(chunk.file_id)
+    return context_blocks, references, used_files
+
+
+def _qa_chat_completion(settings: SystemSetting, *, system: str, user: str) -> str:
+    return chat_completion(
+        provider=settings.llm_provider,
+        api_base=settings.llm_api_base,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+
+
 def ask_question(
     db: Session,
     *,
@@ -405,6 +977,12 @@ def ask_question(
     file_ids: list[int] | None,
     strict_mode: bool,
     top_k: int,
+    candidate_k: int | None = None,
+    max_context_chars: int | None = None,
+    neighbor_window: int | None = None,
+    dedupe_adjacent_chunks: bool | None = None,
+    rerank_enabled: bool | None = None,
+    rerank_top_n: int | None = None,
 ) -> dict:
     if scope_type == "files" and not file_ids:
         raise QAServiceError("NO_INDEXED_CONTENT", "当前尚未选择文件范围，请先选择至少一个文件")
@@ -423,6 +1001,25 @@ def ask_question(
         raise QAServiceError("LLM_NOT_CONFIGURED", "LLM 配置不完整，无法执行问答")
 
     top_k = max(MIN_TOP_K, min(top_k, MAX_TOP_K))
+    candidate_k = max(1, candidate_k if candidate_k is not None else app_settings.qa_candidate_k)
+    neighbor_window = max(0, neighbor_window if neighbor_window is not None else app_settings.qa_neighbor_window)
+    max_context_chars = max(1, max_context_chars if max_context_chars is not None else app_settings.qa_max_context_chars)
+    dedupe_adjacent = bool(
+        dedupe_adjacent_chunks
+        if dedupe_adjacent_chunks is not None
+        else app_settings.qa_dedupe_adjacent_chunks
+    )
+    eff_rerank_enabled = (
+        bool(rerank_enabled)
+        if rerank_enabled is not None
+        else bool(app_settings.qa_rerank_enabled)
+    )
+    eff_rerank_top_n = (
+        max(1, rerank_top_n)
+        if rerank_top_n is not None
+        else max(1, app_settings.qa_rerank_top_n)
+    )
+    pool_limit = min(QA_RETRIEVAL_POOL_CAP, max(MIN_TOP_K, top_k, candidate_k))
 
     try:
         query_embedding = embed_texts(
@@ -445,83 +1042,381 @@ def ask_question(
         expected_dimension=len(query_embedding),
     )
     if not compatible_file_ids:
-        raise QAServiceError(
-            "NO_COMPATIBLE_INDEXED_CONTENT",
-            "当前范围内没有可用于当前知识库索引标准的已索引文献，请先建立或重建索引。",
+        if strict_mode:
+            raise QAServiceError(
+                "NO_COMPATIBLE_INDEXED_CONTENT",
+                "当前范围内没有可用于当前知识库索引标准的已索引文献，请先建立或重建索引。",
+            )
+        user_prompt = (
+            "当前问答范围内没有可用于当前知识库索引标准的已索引文献，无法从知识库取得任何可引用片段。\n"
+            "请基于你的通用知识直接回答用户问题。\n"
+            "要求：不要虚构本知识库中的文献或条文；不要使用「根据上传文件」「资料中记载」等表述。\n\n"
+            f"问题：{question}"
         )
+        system_msg = (
+            "用户处于非严格问答模式，且当前范围内没有可检索的知识库内容；请用通用知识作答，切勿伪造知识库引用。"
+        )
+        try:
+            answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+        except RuntimeError as exc:
+            raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
+        answer = MODEL_NON_KB_PREFIX + answer
+        refs_payload = {"answer_source": "model_general", "references": []}
+        retrieval_meta = _build_retrieval_meta(
+            answer_source="model_general",
+            scope_type=scope_type,
+            strict_mode=strict_mode,
+            top_k=top_k,
+            compatible_file_count=0,
+            candidate_chunks=0,
+            matched_chunks=0,
+            selected_chunks=0,
+            used_file_ids=[],
+            candidate_k=candidate_k,
+            expanded_chunks=0,
+            packed_chunks=0,
+            context_chars=0,
+            neighbor_window=neighbor_window,
+            dedupe_adjacent_chunks=dedupe_adjacent,
+            retrieval_mode="hybrid",
+            semantic_candidate_count=0,
+            lexical_candidate_count=0,
+            fusion_method="none",
+            score_threshold_applied=MIN_SIMILARITY_SCORE,
+            rerank_enabled=eff_rerank_enabled,
+            rerank_input_count=0,
+            rerank_output_count=0,
+            rerank_model_name=app_settings.qa_rerank_model_name,
+            rerank_applied=False,
+            parent_recovered_chunks=0,
+            parent_deduped_groups=0,
+        )
+        return {
+            "answer": answer,
+            "references": [],
+            "references_json": refs_payload,
+            "answer_source": "model_general",
+            "used_files": [],
+            "retrieval_meta": retrieval_meta,
+        }
 
-    matches = _retrieve_chunks(
+    semantic_matches = _semantic_retrieval(
         db,
         query_embedding=query_embedding,
         compatible_file_ids=compatible_file_ids,
-        top_k=top_k,
+        top_k=pool_limit,
     )
-
-    if not matches:
-        raise QAServiceError("NO_RELIABLE_EVIDENCE", "未检索到足够可靠的依据，当前问题暂时无法回答")
-
-    reliable_matches = [item for item in matches if item["score"] >= MIN_SIMILARITY_SCORE]
-    if strict_mode and not reliable_matches:
-        raise QAServiceError("NO_RELIABLE_EVIDENCE", "未检索到足够可靠的依据，当前问题暂时无法回答")
-
-    final_matches = reliable_matches or matches[: min(3, len(matches))]
-    context_blocks = []
-    references = []
-    used_files: list[int] = []
-    for item in final_matches:
-        chunk = item["chunk"]
-        context_blocks.append(
-            f"[文件: {item['file_name']} | chunk: {chunk.chunk_index}]\n{chunk.content}"
-        )
-        references.append(
-            {
-                "file_id": chunk.file_id,
-                "file_name": item["file_name"],
-                "chunk_id": chunk.id,
-                "chunk_index": chunk.chunk_index,
-                "snippet": _build_snippet(chunk.content),
-                "score": item["score"],
-                "section_title": chunk.section_title,
-                "page_number": chunk.page_number,
-            }
-        )
-        if chunk.file_id not in used_files:
-            used_files.append(chunk.file_id)
-
-    prompt = (
-        "你是实验室内部知识库问答助手。请严格依据提供的资料片段回答问题。"
-        "如果资料不足以支撑结论，请明确说“无法根据现有资料确认”。\n\n"
-        f"问题：{question}\n\n"
-        "资料片段：\n"
-        + "\n\n".join(context_blocks)
+    lexical_matches = _lexical_retrieval(
+        db,
+        question=question,
+        compatible_file_ids=compatible_file_ids,
+        top_k=pool_limit,
     )
+    matches = _fuse_retrieval_results(semantic_matches, lexical_matches)
+
+    # --- Rerank ---
+    rerank_input_count = len(matches)
+    matches, rerank_applied = _rerank_matches(
+        matches,
+        question=question,
+        rerank_enabled=eff_rerank_enabled,
+        rerank_top_n=eff_rerank_top_n,
+        rerank_model_name=app_settings.qa_rerank_model_name,
+    )
+    rerank_output_count = len(matches)
+
+    candidate_matches = _truncate_ranked_to_candidate_k(matches, candidate_k)
+    # Branch threshold by retrieval mode (RRF scores << cosine).
+    score_threshold_applied = MIN_HYBRID_RRF_SCORE if "hybrid" else MIN_SIMILARITY_SCORE
+    reliable_matches = [item for item in candidate_matches if item["score"] >= score_threshold_applied]
+    compatible_count = len(compatible_file_ids)
 
     try:
-        answer = chat_completion(
-            provider=settings.llm_provider,
-            api_base=settings.llm_api_base,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一个谨慎、可追溯的实验室知识问答助手。",
-                },
-                {"role": "user", "content": prompt},
-            ],
+        if strict_mode:
+            if not candidate_matches:
+                raise QAServiceError(
+                    "NO_RELIABLE_EVIDENCE",
+                    "知识库中未检索到可用资料，严格模式下无法回答。",
+                )
+            if not reliable_matches:
+                raise QAServiceError(
+                    "NO_RELIABLE_EVIDENCE",
+                    "知识库中未找到足够相关的依据，严格模式下无法回答。",
+                )
+            expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
+            expanded_n = len(expanded_items)
+            deduped_items = _dedupe_chunk_items(expanded_items)
+            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, deduped_items)
+            seed_ids = {item["chunk"].id for item in reliable_matches}
+            (
+                context_blocks,
+                references,
+                used_files,
+                context_chars,
+                packed_n,
+                parent_recovered_chunks,
+            ) = _pack_context_and_references(
+                pack_items,
+                seed_chunk_ids=seed_ids,
+                max_context_chars=max_context_chars,
+                dedupe_adjacent_chunks=dedupe_adjacent,
+            )
+            user_prompt = (
+                "你是实验室内部知识库问答助手。你只允许根据下方「资料片段」回答问题。\n"
+                "要求：\n"
+                "- 结论必须可由资料支撑；不要引入资料未提及的关键事实。\n"
+                "- 若资料不足以回答用户问题，请明确说明无法根据当前知识库资料作出完整回答，不要猜测，"
+                "也不要改用通用知识或常识来替代知识库依据。\n\n"
+                f"问题：{question}\n\n资料片段：\n"
+                + "\n\n".join(context_blocks)
+            )
+            system_msg = (
+                "你是一个只依据用户给定的知识库片段作答的助手；无充分依据时不臆测，也不使用课外知识兜底。"
+            )
+            answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            retrieval_meta = _build_retrieval_meta(
+                answer_source="knowledge_base",
+                scope_type=scope_type,
+                strict_mode=strict_mode,
+                top_k=top_k,
+                compatible_file_count=compatible_count,
+                candidate_chunks=len(matches),
+                matched_chunks=len(reliable_matches),
+                selected_chunks=packed_n,
+                used_file_ids=list(used_files),
+                candidate_k=candidate_k,
+                expanded_chunks=expanded_n,
+                packed_chunks=packed_n,
+                context_chars=context_chars,
+                neighbor_window=neighbor_window,
+                dedupe_adjacent_chunks=dedupe_adjacent,
+                retrieval_mode="hybrid",
+                semantic_candidate_count=len(semantic_matches),
+                lexical_candidate_count=len(lexical_matches),
+                fusion_method="rrf",
+                score_threshold_applied=score_threshold_applied,
+                rerank_enabled=eff_rerank_enabled,
+                rerank_input_count=rerank_input_count,
+                rerank_output_count=rerank_output_count,
+                rerank_model_name=app_settings.qa_rerank_model_name,
+                rerank_applied=rerank_applied,
+                parent_recovered_chunks=parent_recovered_chunks,
+                parent_deduped_groups=parent_deduped_groups,
+            )
+            return {
+                "answer": answer,
+                "references": references,
+                "references_json": references,
+                "answer_source": "knowledge_base",
+                "used_files": used_files,
+                "retrieval_meta": retrieval_meta,
+            }
+
+        if reliable_matches:
+            expanded_items = _expand_neighbor_chunks(db, reliable_matches, neighbor_window)
+            expanded_n = len(expanded_items)
+            deduped_items = _dedupe_chunk_items(expanded_items)
+            pack_items, parent_deduped_groups = _recover_parent_context_for_packing(db, deduped_items)
+            seed_ids = {item["chunk"].id for item in reliable_matches}
+            (
+                context_blocks,
+                references,
+                used_files,
+                context_chars,
+                packed_n,
+                parent_recovered_chunks,
+            ) = _pack_context_and_references(
+                pack_items,
+                seed_chunk_ids=seed_ids,
+                max_context_chars=max_context_chars,
+                dedupe_adjacent_chunks=dedupe_adjacent,
+            )
+            user_prompt = (
+                "你是实验室知识库问答助手。请优先根据下方「资料片段」回答问题。\n"
+                "要求：\n"
+                "- 当资料足以支撑结论时，以资料为准，回答应体现资料中的要点。\n"
+                "- 若资料仅有部分相关信息，可先说明资料中的依据，再在必要时少量结合常识补充，"
+                "但不要与资料矛盾，也不要虚构资料中不存在的内容或引用。\n"
+                "- 若资料明显不足以判断用户问题，请说明资料局限，不要假装资料已覆盖。\n\n"
+                f"问题：{question}\n\n资料片段：\n"
+                + "\n\n".join(context_blocks)
+            )
+            system_msg = (
+                "你优先依据用户提供的知识库资料作答；仅在资料边界清晰的前提下可谨慎补充常识，不伪造知识库内容。"
+            )
+            answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            retrieval_meta = _build_retrieval_meta(
+                answer_source="knowledge_base",
+                scope_type=scope_type,
+                strict_mode=strict_mode,
+                top_k=top_k,
+                compatible_file_count=compatible_count,
+                candidate_chunks=len(matches),
+                matched_chunks=len(reliable_matches),
+                selected_chunks=packed_n,
+                used_file_ids=list(used_files),
+                candidate_k=candidate_k,
+                expanded_chunks=expanded_n,
+                packed_chunks=packed_n,
+                context_chars=context_chars,
+                neighbor_window=neighbor_window,
+                dedupe_adjacent_chunks=dedupe_adjacent,
+                retrieval_mode="hybrid",
+                semantic_candidate_count=len(semantic_matches),
+                lexical_candidate_count=len(lexical_matches),
+                fusion_method="rrf",
+                score_threshold_applied=score_threshold_applied,
+                rerank_enabled=eff_rerank_enabled,
+                rerank_input_count=rerank_input_count,
+                rerank_output_count=rerank_output_count,
+                rerank_model_name=app_settings.qa_rerank_model_name,
+                rerank_applied=rerank_applied,
+                parent_recovered_chunks=parent_recovered_chunks,
+                parent_deduped_groups=parent_deduped_groups,
+            )
+            return {
+                "answer": answer,
+                "references": references,
+                "references_json": references,
+                "answer_source": "knowledge_base",
+                "used_files": used_files,
+                "retrieval_meta": retrieval_meta,
+            }
+
+        low_rel_note = ""
+        if candidate_matches:
+            low_rel_note = (
+                "说明：知识库中检索到少量片段，但相似度未达到采用为「知识库依据」的阈值，"
+                "故不将检索片段作为引用依据。请完全基于你的通用知识回答，不要引用或编造具体知识库文件名或片段。\n\n"
+            )
+        user_prompt = (
+            "当前没有可作为依据的知识库资料片段供你引用。\n"
+            + low_rel_note
+            + "请基于你的通用知识直接回答用户问题。\n"
+            "要求：不要虚构本知识库中的文献或条文；不要使用「根据上传文件」「资料中记载」等表述。\n\n"
+            f"问题：{question}"
         )
+        system_msg = (
+            "用户处于非严格问答模式，且当前没有可用的知识库片段；请用通用知识作答，切勿伪造知识库引用。"
+        )
+        answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+        answer = MODEL_NON_KB_PREFIX + answer
+        low_confidence = bool(candidate_matches)
+        answer_src = "knowledge_base_low_confidence" if low_confidence else "model_general"
+        refs_payload = {"answer_source": answer_src, "references": []}
+        retrieval_meta = _build_retrieval_meta(
+            answer_source=answer_src,
+            scope_type=scope_type,
+            strict_mode=strict_mode,
+            top_k=top_k,
+            compatible_file_count=compatible_count,
+            candidate_chunks=len(matches),
+            matched_chunks=len(reliable_matches),
+            selected_chunks=0,
+            used_file_ids=[],
+            candidate_k=candidate_k,
+            expanded_chunks=0,
+            packed_chunks=0,
+            context_chars=0,
+            neighbor_window=neighbor_window,
+            dedupe_adjacent_chunks=dedupe_adjacent,
+            retrieval_mode="hybrid",
+            semantic_candidate_count=len(semantic_matches),
+            lexical_candidate_count=len(lexical_matches),
+            fusion_method="rrf",
+            score_threshold_applied=score_threshold_applied,
+            rerank_enabled=eff_rerank_enabled,
+            rerank_input_count=rerank_input_count,
+            rerank_output_count=rerank_output_count,
+            rerank_model_name=app_settings.qa_rerank_model_name,
+            rerank_applied=rerank_applied,
+            parent_recovered_chunks=0,
+            parent_deduped_groups=0,
+        )
+        return {
+            "answer": answer,
+            "references": [],
+            "references_json": refs_payload,
+            "answer_source": answer_src,
+            "used_files": [],
+            "retrieval_meta": retrieval_meta,
+        }
     except RuntimeError as exc:
         raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
 
-    return {
-        "answer": answer,
-        "references": references,
-        "used_files": used_files,
-        "retrieval_meta": {
-            "scope_type": scope_type,
-            "top_k": top_k,
-            "min_score": MIN_SIMILARITY_SCORE,
-            "candidate_chunks": len(matches),
-            "matched_chunks": len(final_matches),
-        },
-    }
+
+def persist_qa_citations(
+    db: Session,
+    *,
+    message_id: int,
+    references: list[dict] | None,
+) -> None:
+    """Insert normalized citation rows for a successful assistant message."""
+    if not references:
+        return
+    for order, ref in enumerate(references):
+        if not isinstance(ref, dict):
+            continue
+        try:
+            file_id = int(ref["file_id"])
+            chunk_id = int(ref["chunk_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        chunk_index = int(ref.get("chunk_index", 0))
+        page = ref.get("page_number")
+        page_number = int(page) if page is not None else None
+        st = ref.get("section_title")
+        section_title = (str(st)[:500] if st is not None else None)
+        score_v = ref.get("score")
+        try:
+            score_f = float(score_v) if score_v is not None else None
+        except (TypeError, ValueError):
+            score_f = None
+        db.add(
+            QACitation(
+                message_id=message_id,
+                file_id=file_id,
+                chunk_id=chunk_id,
+                chunk_index=chunk_index,
+                page_number=page_number,
+                section_title=section_title,
+                score=score_f,
+                citation_order=order,
+            )
+        )
+    db.commit()
+
+
+def persist_retrieval_trace(
+    db: Session,
+    *,
+    session_id: int,
+    assistant_message_id: int | None,
+    question: str,
+    retrieval_meta: dict | None,
+    answer_source: str | None,
+    debug_json: dict | None = None,
+) -> None:
+    """Persist one retrieval trace row (success or failure)."""
+    meta = retrieval_meta or {}
+    dbg = debug_json if debug_json is not None else (dict(meta) if meta else None)
+    trace = QARetrievalTrace(
+        session_id=session_id,
+        assistant_message_id=assistant_message_id,
+        question=question,
+        retrieval_mode=meta.get("retrieval_mode"),
+        fusion_method=meta.get("fusion_method"),
+        top_k=meta.get("top_k"),
+        candidate_k=meta.get("candidate_k"),
+        candidate_chunks=meta.get("candidate_chunks"),
+        matched_chunks=meta.get("matched_chunks"),
+        selected_chunks=meta.get("selected_chunks"),
+        score_threshold_applied=meta.get("score_threshold_applied"),
+        answer_source=answer_source or meta.get("answer_source"),
+        rerank_enabled=meta.get("rerank_enabled"),
+        rerank_applied=meta.get("rerank_applied"),
+        rerank_model_name=meta.get("rerank_model_name"),
+        debug_json=dbg,
+    )
+    db.add(trace)
+    db.commit()

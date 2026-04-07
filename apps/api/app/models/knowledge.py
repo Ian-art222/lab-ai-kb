@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 
 import sqlalchemy as sa
+from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -30,6 +32,19 @@ class KnowledgeChunk(Base):
     token_count: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     # Store embedding as Postgres float array for MVP compatibility.
     embedding: Mapped[list[float] | None] = mapped_column(sa.ARRAY(sa.Float), nullable=True)
+    # pgvector column (fixed dim in DB migration; NULL when embedding dim differs).
+    embedding_vec: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    search_vector: Mapped[TSVECTOR | None] = mapped_column(
+        TSVECTOR, nullable=True,
+        comment="PostgreSQL full-text search vector (simple config, populated externally).",
+    )
+    chunk_kind: Mapped[str | None] = mapped_column(sa.String(20), nullable=True, index=True)
+    parent_chunk_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("knowledge_chunks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime, default=datetime.utcnow, nullable=False
@@ -82,4 +97,55 @@ class QAMessage(Base):
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime, default=datetime.utcnow, nullable=False
     )
+
+
+class QARetrievalTrace(Base):
+    """One row per /api/qa/ask attempt for analytics (success or failure)."""
+
+    __tablename__ = "qa_retrieval_traces"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, index=True)
+    session_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("qa_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    assistant_message_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("qa_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    retrieval_mode: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
+    fusion_method: Mapped[str | None] = mapped_column(sa.String(40), nullable=True)
+    top_k: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    candidate_k: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    candidate_chunks: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    matched_chunks: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    selected_chunks: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    score_threshold_applied: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    answer_source: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    rerank_enabled: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    rerank_applied: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    rerank_model_name: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    debug_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime, default=datetime.utcnow, nullable=False
+    )
+
+
+class QACitation(Base):
+    """Normalized citations for an assistant answer (optional; empty on errors)."""
+
+    __tablename__ = "qa_citations"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True, index=True)
+    message_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("qa_messages.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    file_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
+    chunk_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
+    chunk_index: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    section_title: Mapped[str | None] = mapped_column(sa.String(500), nullable=True)
+    score: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    citation_order: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
 

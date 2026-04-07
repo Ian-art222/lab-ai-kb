@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     embed_retry_base_delay: float = 1.0
     embed_batch_delay: float = 0.25
 
+    # QA retrieval defaults (read in qa_service; not wired to AskRequest yet)
+    qa_candidate_k: int = 16
+    qa_max_context_chars: int = 24000
+    qa_neighbor_window: int = 1
+    qa_dedupe_adjacent_chunks: bool = True
+
+    # Rerank
+    qa_rerank_enabled: bool = False
+    qa_rerank_top_n: int = 20
+    qa_rerank_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # pgvector semantic search (dimension must match migration + DB column; mismatch → in-memory fallback)
+    qa_pgvector_semantic_enabled: bool = True
+    qa_pgvector_dimensions: int = 1536
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

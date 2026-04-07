@@ -13,12 +13,43 @@ export interface AskReference {
   page_number?: number | null
 }
 
+export type AnswerSource =
+  | 'knowledge_base'
+  | 'knowledge_base_low_confidence'
+  | 'model_general'
+  | 'error'
+
 export interface RetrievalMeta {
+  retrieval_strategy: string
+  answer_source: AnswerSource
   scope_type: ScopeType
+  strict_mode: boolean
   top_k: number
-  min_score?: number | null
+  min_similarity_score: number
   candidate_chunks: number
   matched_chunks: number
+  selected_chunks: number
+  compatible_file_count: number
+  used_file_ids: number[]
+  /** @deprecated same as min_similarity_score; kept for older responses */
+  min_score?: number | null
+  candidate_k?: number | null
+  expanded_chunks?: number | null
+  packed_chunks?: number | null
+  context_chars?: number | null
+  neighbor_window?: number | null
+  dedupe_adjacent_chunks?: boolean | null
+  retrieval_mode?: string | null
+  semantic_candidate_count?: number | null
+  lexical_candidate_count?: number | null
+  fusion_method?: string | null
+  rerank_enabled?: boolean | null
+  rerank_input_count?: number | null
+  rerank_output_count?: number | null
+  rerank_model_name?: string | null
+  rerank_applied?: boolean | null
+  parent_recovered_chunks?: number | null
+  parent_deduped_groups?: number | null
 }
 
 export interface AskResponse {
@@ -28,6 +59,7 @@ export interface AskResponse {
   references: AskReference[]
   used_files: number[]
   retrieval_meta: RetrievalMeta
+  answer_source: AnswerSource
 }
 
 export interface CreateSessionResponse {
@@ -132,6 +164,12 @@ export async function askApi(params: {
   file_ids?: number[]
   strict_mode?: boolean
   top_k?: number
+  candidate_k?: number | null
+  max_context_chars?: number | null
+  neighbor_window?: number | null
+  dedupe_adjacent_chunks?: boolean | null
+  rerank_enabled?: boolean | null
+  rerank_top_n?: number | null
 }): Promise<AskResponse> {
   const body: any = {
     question: params.question,
@@ -141,6 +179,12 @@ export async function askApi(params: {
     file_ids: params.file_ids ?? null,
     strict_mode: params.strict_mode ?? true,
     top_k: params.top_k ?? 6,
+    candidate_k: params.candidate_k ?? null,
+    max_context_chars: params.max_context_chars ?? null,
+    neighbor_window: params.neighbor_window ?? null,
+    dedupe_adjacent_chunks: params.dedupe_adjacent_chunks ?? null,
+    rerank_enabled: params.rerank_enabled ?? null,
+    rerank_top_n: params.rerank_top_n ?? null,
   }
 
   const response = await apiFetch('/api/qa/ask', {

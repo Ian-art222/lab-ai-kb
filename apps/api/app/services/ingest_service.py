@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyPDF2 import PdfReader
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from docx import Document
 
@@ -230,29 +231,82 @@ def ingest_file_job(
         if truncated:
             warnings.append("文件文本较长，本次仅截取前 200000 个字符建立索引")
 
-        chunks: list[dict] = []
-        for segment in limited_segments:
-            segment_chunks, segment_warning = _chunk_text(
-                segment["text"],
-                page_number=segment.get("page_number"),
+        # Unified in-memory spec for DB rows (parent = segment-level, child = _chunk_text slices).
+        # parent_ref: index into this list for the parent row; None for parent rows.
+        # parent_chunk_id FK is not filled here (second pass / separate change).
+        rows_spec: list[dict] = []
+        for seg_idx, segment in enumerate(limited_segments):
+            seg_text = segment["text"].strip()
+            if not seg_text:
+                continue
+            page_no = segment.get("page_number")
+            section_guess = _guess_section_title(seg_text)
+            parent_meta = {
+                "source_file_name": file_record.file_name,
+                "page_number": page_no,
+                "section_title": section_guess,
+                "segment_order": seg_idx,
+                "chunk_role": "parent",
+            }
+            parent_row_index = len(rows_spec)
+            rows_spec.append(
+                {
+                    "chunk_kind": "parent",
+                    "parent_ref": None,
+                    "content": seg_text,
+                    "chunk_index": -1,
+                    "page_number": page_no,
+                    "section_title": section_guess,
+                    "metadata_json": dict(parent_meta),
+                }
             )
-            chunks.extend(segment_chunks)
+            segment_chunks, segment_warning = _chunk_text(
+                seg_text,
+                page_number=page_no,
+            )
+            for ci, ch in enumerate(segment_chunks or []):
+                child_meta = {
+                    "source_file_name": file_record.file_name,
+                    "page_number": ch.get("page_number"),
+                    "section_title": ch.get("section_title"),
+                    "segment_order": seg_idx,
+                    "child_index_in_segment": ci,
+                    "chunk_role": "child",
+                    "parent_row_index": parent_row_index,
+                }
+                rows_spec.append(
+                    {
+                        "chunk_kind": "child",
+                        "parent_ref": parent_row_index,
+                        "content": ch["content"],
+                        "chunk_index": -1,
+                        "page_number": ch.get("page_number"),
+                        "section_title": ch.get("section_title"),
+                        "metadata_json": child_meta,
+                    }
+                )
             if segment_warning and segment_warning not in warnings:
                 warnings.append(segment_warning)
-        if not chunks:
+        if not rows_spec:
             raise ValueError("文本内容不足以形成可用索引")
 
+        for i, row in enumerate(rows_spec):
+            row["chunk_index"] = i
+
+        child_indices = [i for i, r in enumerate(rows_spec) if r["chunk_kind"] == "child"]
+
         logger.info(
-            "Start ingest file_id=%s chunk_count=%s extracted_text_length=%s",
+            "Start ingest file_id=%s row_count=%s child_count=%s extracted_text_length=%s",
             file_record.id,
-            len(chunks),
+            len(rows_spec),
+            len(child_indices),
             len(text),
         )
 
         db.query(KnowledgeChunk).filter(KnowledgeChunk.file_id == file_record.id).delete()
 
         settings = db.query(SystemSetting).filter(SystemSetting.id == 1).first()
-        embeddings: list[list[float] | None] = [None] * len(chunks)
+        embeddings: list[list[float] | None] = []
         embedding_warning: str | None = None
         index_embedding_provider: str | None = None
         index_embedding_model: str | None = None
@@ -272,27 +326,30 @@ def ingest_file_job(
                 embedding_provider_raw=settings.embedding_provider,
                 db_batch_size=settings.embedding_batch_size,
             )
-            total_batches = (len(chunks) + effective_batch - 1) // effective_batch
+            total_batches = (
+                (len(child_indices) + effective_batch - 1) // effective_batch if child_indices else 0
+            )
             logger.info(
-                "Embedding ingest file_id=%s provider=%s model=%s index_standard=%s chunk_count=%s total_batches=%s "
+                "Embedding ingest file_id=%s provider=%s model=%s index_standard=%s child_chunk_count=%s total_batches=%s "
                 "effective_batch_size=%s db_embedding_batch_size=%s",
                 file_record.id,
                 settings.embedding_provider,
                 settings.embedding_model,
                 current_index_standard,
-                len(chunks),
+                len(child_indices),
                 total_batches,
                 effective_batch,
                 settings.embedding_batch_size,
             )
-            embeddings = embed_texts(
-                provider=settings.embedding_provider,
-                api_base=settings.embedding_api_base,
-                api_key=settings.embedding_api_key,
-                model=settings.embedding_model,
-                inputs=[chunk["content"] for chunk in chunks],
-                embedding_batch_size_from_db=settings.embedding_batch_size,
-            )
+            if child_indices:
+                embeddings = embed_texts(
+                    provider=settings.embedding_provider,
+                    api_base=settings.embedding_api_base,
+                    api_key=settings.embedding_api_key,
+                    model=settings.embedding_model,
+                    inputs=[rows_spec[i]["content"] for i in child_indices],
+                    embedding_batch_size_from_db=settings.embedding_batch_size,
+                )
             if embeddings and embeddings[0]:
                 index_embedding_provider = settings.embedding_provider
                 index_embedding_model = settings.embedding_model
@@ -308,22 +365,82 @@ def ingest_file_job(
             embedding_warning = "Embedding 配置不完整，本次仅完成文本分块索引"
             warnings.append(embedding_warning)
 
+        emb_by_row: dict[int, list[float] | None] = {
+            row_i: embeddings[j] if j < len(embeddings) else None
+            for j, row_i in enumerate(child_indices)
+        }
+
         now = datetime.utcnow()
-        for idx, chunk in enumerate(chunks):
-            db.add(
-                KnowledgeChunk(
-                    file_id=file_record.id,
-                    folder_id=file_record.folder_id,
-                    chunk_index=idx,
-                    content=chunk["content"],
-                    section_title=chunk["section_title"],
-                    page_number=chunk["page_number"],
-                    token_count=len(chunk["content"]),
-                    embedding=embeddings[idx],
-                    created_at=now,
-                    updated_at=now,
-                )
+        # parent_ref = rows_spec index of the parent row → DB id after phase 1.
+        parent_db_id_by_spec_index: dict[int, int] = {}
+
+        # Phase 1: parents only (no embedding); flush so children get stable parent_chunk_id.
+        parent_rows: list[tuple[int, KnowledgeChunk]] = []
+        for idx, spec in enumerate(rows_spec):
+            if spec["chunk_kind"] != "parent":
+                continue
+            row = KnowledgeChunk(
+                file_id=file_record.id,
+                folder_id=file_record.folder_id,
+                chunk_index=spec["chunk_index"],
+                content=spec["content"],
+                section_title=spec.get("section_title"),
+                page_number=spec.get("page_number"),
+                token_count=len(spec["content"]),
+                embedding=None,
+                embedding_vec=None,
+                chunk_kind=spec["chunk_kind"],
+                parent_chunk_id=None,
+                metadata_json=spec.get("metadata_json"),
+                created_at=now,
+                updated_at=now,
             )
+            db.add(row)
+            parent_rows.append((idx, row))
+        db.flush()
+        for idx, row in parent_rows:
+            parent_db_id_by_spec_index[idx] = row.id
+
+        # Phase 2: children with embeddings and parent_chunk_id from parent_ref (rows_spec index).
+        for spec in rows_spec:
+            if spec["chunk_kind"] != "child":
+                continue
+            pref = spec["parent_ref"]
+            parent_db_id = (
+                parent_db_id_by_spec_index.get(pref) if pref is not None else None
+            )
+            emb = emb_by_row.get(spec["chunk_index"])
+            ev = None
+            if emb and len(emb) == app_settings.qa_pgvector_dimensions:
+                ev = emb
+            row = KnowledgeChunk(
+                file_id=file_record.id,
+                folder_id=file_record.folder_id,
+                chunk_index=spec["chunk_index"],
+                content=spec["content"],
+                section_title=spec.get("section_title"),
+                page_number=spec.get("page_number"),
+                token_count=len(spec["content"]),
+                embedding=emb,
+                embedding_vec=ev,
+                chunk_kind=spec["chunk_kind"],
+                parent_chunk_id=parent_db_id,
+                metadata_json=spec.get("metadata_json"),
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+        db.flush()
+
+        # Lexical index only on retrieval rows (child / legacy); parents skip FTS.
+        db.execute(
+            text(
+                "UPDATE knowledge_chunks "
+                "SET search_vector = to_tsvector('simple', coalesce(content, '')) "
+                "WHERE file_id = :fid AND (chunk_kind = 'child' OR chunk_kind IS NULL)"
+            ),
+            {"fid": file_record.id},
+        )
 
         return _mark_index_success(
             db,

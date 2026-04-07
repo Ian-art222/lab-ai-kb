@@ -10,16 +10,18 @@ from app.models.user import User
 from app.services.ingest_service import ingest_file_job as run_file_ingest
 from app.services.qa_service import (
     QAServiceError,
-    append_qa_messages,
     append_qa_failure,
+    append_qa_messages,
     ask_question as run_qa,
     delete_session as remove_session,
     ensure_session,
     list_session_messages,
     list_user_sessions,
+    persist_qa_citations,
+    persist_retrieval_trace,
 )
 from app.services.settings_service import mark_last_qa_status
-from app.schemas.qa import AskRequest, IngestFileRequest
+from app.schemas.qa import AskRequest, AskSuccessResponse, IngestFileRequest
 
 router = APIRouter(prefix="/api/qa", tags=["qa"])
 
@@ -40,7 +42,7 @@ def _run_ingest_in_background(file_id: int) -> None:
         db.close()
 
 
-@router.post("/ask")
+@router.post("/ask", response_model=AskSuccessResponse)
 def ask_question(
     payload: AskRequest,
     db: Session = Depends(get_db),
@@ -63,13 +65,31 @@ def ask_question(
             file_ids=payload.file_ids,
             strict_mode=payload.strict_mode,
             top_k=payload.top_k,
+            candidate_k=payload.candidate_k,
+            max_context_chars=payload.max_context_chars,
+            neighbor_window=payload.neighbor_window,
+            dedupe_adjacent_chunks=payload.dedupe_adjacent_chunks,
+            rerank_enabled=payload.rerank_enabled,
+            rerank_top_n=payload.rerank_top_n,
         )
         _, assistant_message = append_qa_messages(
             db,
             session_id=session.id,
             question=payload.question,
             answer=result["answer"],
-            references=result["references"],
+            references_json=result["references_json"],
+        )
+        refs = result.get("references")
+        if isinstance(refs, list):
+            persist_qa_citations(db, message_id=assistant_message.id, references=refs)
+        meta = result.get("retrieval_meta")
+        persist_retrieval_trace(
+            db,
+            session_id=session.id,
+            assistant_message_id=assistant_message.id,
+            question=payload.question,
+            retrieval_meta=meta if isinstance(meta, dict) else None,
+            answer_source=result.get("answer_source"),
         )
         mark_last_qa_status(db, success=True, error_message=None)
         return {
@@ -79,22 +99,40 @@ def ask_question(
         }
     except RuntimeError as exc:
         if session is not None:
-            append_qa_failure(
+            _, assistant_message = append_qa_failure(
                 db,
                 session_id=session.id,
                 question=payload.question,
                 error_message=str(exc),
             )
+            persist_retrieval_trace(
+                db,
+                session_id=session.id,
+                assistant_message_id=assistant_message.id,
+                question=payload.question,
+                retrieval_meta=None,
+                answer_source="error",
+                debug_json={"message": str(exc)},
+            )
         mark_last_qa_status(db, success=False, error_message=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except QAServiceError as exc:
         if session is not None:
-            append_qa_failure(
+            _, assistant_message = append_qa_failure(
                 db,
                 session_id=session.id,
                 question=payload.question,
                 error_message=exc.message,
                 error_code=exc.code,
+            )
+            persist_retrieval_trace(
+                db,
+                session_id=session.id,
+                assistant_message_id=assistant_message.id,
+                question=payload.question,
+                retrieval_meta=None,
+                answer_source="error",
+                debug_json={"code": exc.code, "message": exc.message},
             )
         mark_last_qa_status(db, success=False, error_message=exc.message)
         raise HTTPException(
