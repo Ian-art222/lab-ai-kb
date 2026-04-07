@@ -187,7 +187,25 @@ cd apps/api
 .venv\Scripts\python scripts\smoke_check.py
 ```
 
-### 9.2 RAG 评测
+### 9.2 Phase 2.5 管理员诊断 Smoke / Acceptance
+
+```bash
+cd apps/api
+python scripts/smoke_phase25_admin_diagnostics.py \
+  --base-url http://127.0.0.1:8000 \
+  --admin-user <admin> \
+  --admin-pass <admin_pass> \
+  --member-user <member> \
+  --member-pass <member_pass>
+```
+
+说明：
+- 会校验 admin diagnostics（列表/详情/retry/export/stats）链路。
+- 会校验 member 访问 admin diagnostics 接口返回 403。
+- 依赖 PostgreSQL、API、账号、索引与 QA 环境可用；未启动依赖时会明确失败退出。
+- 详细流程见 `docs/phase25_admin_diagnostics_and_smoke.md`。
+
+### 9.3 RAG 评测
 
 ```bash
 cd apps/api

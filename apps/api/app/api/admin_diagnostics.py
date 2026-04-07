@@ -8,8 +8,19 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.diagnostics import RetryIndexResponse, TraceListResponse
-from app.services.diagnostics_service import get_trace_detail, list_traces, retry_or_reindex_file
+from app.schemas.diagnostics import (
+    RetryIndexResponse,
+    TraceExportResponse,
+    TraceListResponse,
+    TraceReasonStatItem,
+)
+from app.services.diagnostics_service import (
+    export_trace,
+    get_trace_detail,
+    list_reason_code_stats,
+    list_traces,
+    retry_or_reindex_file,
+)
 
 router = APIRouter(prefix="/api/admin/diagnostics", tags=["admin-diagnostics"])
 
@@ -44,6 +55,14 @@ def get_traces(
     )
 
 
+@router.get("/traces/stats/reasons", response_model=list[TraceReasonStatItem])
+def get_reason_stats(
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    return list_reason_code_stats(db)
+
+
 @router.get("/traces/{trace_id}")
 def get_trace(
     trace_id: str,
@@ -51,6 +70,15 @@ def get_trace(
     _: User = Depends(require_admin),
 ):
     return get_trace_detail(db, trace_id=trace_id)
+
+
+@router.get("/traces/{trace_id}/export", response_model=TraceExportResponse)
+def export_trace_json(
+    trace_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    return export_trace(db, trace_id=trace_id)
 
 
 @router.post("/files/{file_id}/retry-index", response_model=RetryIndexResponse)
