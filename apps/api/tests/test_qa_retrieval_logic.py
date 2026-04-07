@@ -12,6 +12,7 @@ from app.services.qa_service import (
     _normalize_retrieval_mode,
     _score_threshold_for_mode,
 )
+from app.services.qa_agent_workflow import classify_task_type, plan_retrieval
 
 
 class TestQARetrievalLogic(unittest.TestCase):
@@ -63,10 +64,39 @@ class TestQARetrievalLogic(unittest.TestCase):
             rerank_output_count=5,
             rerank_model_name="mock",
             rerank_applied=True,
+            task_type="simple_qa",
+            planner_output={"selected_strategy": "light_qa"},
+            selected_strategy="light_qa",
+            workflow_steps_json=[{"step": "plan_retrieval", "status": "completed"}],
+            tool_traces_json=[{"tool": "classify_task_type"}],
+            session_context_json={"scope_type": "all"},
+            final_answer_type="knowledge_base",
         )
         self.assertEqual(meta["min_similarity_score"], 0.012)
         self.assertEqual(meta["min_score"], 0.012)
         self.assertEqual(meta["rewritten_queries"], [])
+        self.assertEqual(meta["task_type"], "simple_qa")
+        self.assertEqual(meta["selected_strategy"], "light_qa")
+
+    def test_task_router_and_planner(self):
+        routing = classify_task_type(
+            question="请比较方案A和方案B的优缺点",
+            scope_type="files",
+            file_ids=[1, 2],
+        )
+        self.assertEqual(routing["task_type"], "compare")
+        plan = plan_retrieval(
+            task_type=routing["task_type"],
+            normalized_query="请比较方案A和方案B的优缺点",
+            rewritten_queries=["请比较方案A和方案B的优缺点"],
+            scope_type="files",
+            strict_mode=True,
+            top_k=4,
+            candidate_k=4,
+            file_ids=[1, 2],
+        )
+        self.assertEqual(plan["selected_strategy"], "compare_dual_focus")
+        self.assertGreaterEqual(plan["top_k"], 6)
 
     def test_grounded_answer_guard(self):
         self.assertFalse(_is_grounded_answer("", [{"chunk_id": 1}]))
