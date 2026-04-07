@@ -254,3 +254,138 @@ Not recommended as default right now:
 - `openai`: adapted, but still needs real-credential validation in your target environment
 - `anthropic`: chat only, not usable as retrieval embedding default
 - `kimi` / `hunyuan`: adapted through aliasing, but not yet the best default choice without live validation
+
+## Docker Compose 部署（单机 2 CPU / 4GB）
+
+> 目标：在实验室共享服务器上，以单机单栈方式部署 `web + api + db`，并保持当前架构（LLM/Embedding 继续通过外部 Provider API 调用，本机不做模型推理）。
+
+### 前置条件
+
+- Docker Engine + Docker Compose Plugin（`docker compose` 可用）
+- 服务器可访问外部模型 Provider API（如 Gemini / DashScope / OpenAI-compatible）
+- 仓库根目录包含：
+  - `docker-compose.yml`
+  - `apps/api/Dockerfile`
+  - `apps/web/Dockerfile`
+  - `apps/api/docker/entrypoint.sh`
+  - `deploy/nginx.lab-ai-kb.conf`
+
+### 环境变量准备
+
+1. API 环境变量：
+
+```bash
+cp apps/api/.env.example apps/api/.env
+```
+
+2. 至少修改以下变量：
+
+- `JWT_SECRET_KEY`：改成强随机值
+- `LLM_API_KEY` / `EMBEDDING_API_KEY`：填入真实 Provider 密钥
+- 其余 `LLM_*` / `EMBEDDING_*` 按你的外部 Provider 调整
+
+3. `DATABASE_URL` 在 Compose 下会由 `docker-compose.yml` 覆盖为容器内地址（`db:5432`），不需要手动改成 `127.0.0.1`。
+
+4. 可选：通过环境变量覆盖 `POSTGRES_PASSWORD`（默认 `postgres`）。
+
+### 首次部署
+
+```bash
+docker compose up -d --build
+```
+
+说明：
+
+- `api` 容器启动时会自动等待数据库可用，并执行 `alembic upgrade head`
+- 之后以单进程 `uvicorn` 启动（无多 worker）
+- 默认仅暴露 `web`：`127.0.0.1:8080 -> container:80`
+
+### 更新部署
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+### 数据持久化位置
+
+使用命名卷：
+
+- `db_data`：PostgreSQL 数据目录
+- `api_uploads`：后端上传文件目录（容器内 `/app/data/uploads`）
+- 以上两类数据在容器重建/更新/重启后都会保留（前提是不删除卷）。
+- 备份建议：同时备份 `db_data` 与 `api_uploads`，避免出现“数据库记录存在但文件缺失”。
+- ⚠️ 请勿执行 `docker compose down -v`，该命令会删除卷并导致持久化数据丢失。
+
+查看卷：
+
+```bash
+docker volume ls
+```
+
+### 日志查看
+
+```bash
+docker compose logs -f
+```
+
+只看某个服务：
+
+```bash
+docker compose logs -f api
+docker compose logs -f web
+docker compose logs -f db
+```
+
+### 数据库迁移
+
+常规情况下，`api` 启动会自动执行迁移。也可手工执行：
+
+```bash
+docker compose exec api alembic upgrade head
+```
+
+### 停止 / 重启
+
+```bash
+docker compose stop
+docker compose start
+```
+
+或完整下线（保留卷）：
+
+```bash
+docker compose down
+```
+
+### 服务可用性确认
+
+```bash
+# 前端首页
+curl -I http://127.0.0.1:8080
+
+# API 健康检查（通过前端同源反代）
+curl http://127.0.0.1:8080/health
+
+# 直接查看 api 容器健康状态
+docker inspect --format='{{.State.Health.Status}}' lab-ai-kb-api
+```
+
+### 2 CPU / 4GB 资源预算说明
+
+当前 compose 为每个服务设置了保守上限（合计不超过目标）：
+
+- `web`: `0.20 CPU`, `256MB`
+- `api`: `1.00 CPU`, `1536MB`
+- `db`: `0.80 CPU`, `1536MB`
+
+总计：`2.00 CPU`, `3328MB`（留出额外缓冲）。
+
+### 架构边界声明
+
+本部署严格保持当前项目边界：
+
+- 仅包含 `web / api / db` 三个常驻服务
+- 不引入 Redis、Celery、MinIO、Elasticsearch、OCR、多模态组件
+- 不引入本地 LLM / Embedding 推理服务
+- LLM 与 embedding 持续通过外部 Provider API 调用

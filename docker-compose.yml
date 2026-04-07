@@ -1,0 +1,76 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: lab-ai-kb-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lab_ai_kb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lab_ai_kb"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    cpus: "0.80"
+    mem_limit: 1536m
+    mem_reservation: 1024m
+    pids_limit: 256
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: lab-ai-kb-api
+    restart: unless-stopped
+    env_file:
+      - path: ./apps/api/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/lab_ai_kb
+      APP_ENV: production
+      UPLOAD_DIR: /app/data/uploads
+    volumes:
+      - api_uploads:/app/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    cpus: "1.00"
+    mem_limit: 1536m
+    mem_reservation: 1024m
+    pids_limit: 512
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: lab-ai-kb-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    cpus: "0.20"
+    mem_limit: 256m
+    mem_reservation: 128m
+    pids_limit: 128
+
+volumes:
+  db_data:
+  api_uploads:
