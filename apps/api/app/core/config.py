@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     qa_query_expansion_enabled: bool = False
     qa_query_expansion_max_queries: int = 3
 
+    # Source diversity control (relevance-first, not forced multi-source)
+    qa_max_chunks_per_doc: int = 2
+    qa_target_distinct_docs: int = 3
+    qa_min_distinct_docs_for_multi_source: int = 2
+    qa_single_doc_dominance_ratio: float = 1.6
+    qa_diversity_rerank_enabled: bool = False
+    qa_diversity_lambda: float = 0.75
+    qa_diversity_fetch_k: int = 24
+    qa_redundancy_sim_threshold: float = 0.9
+    qa_redundancy_adjacent_window: int = 1
+
     # Grounding guardrail
     qa_strict_min_citations: int = 1
     qa_min_grounded_citations: int = 1

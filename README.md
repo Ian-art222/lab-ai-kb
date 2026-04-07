@@ -67,6 +67,15 @@ EMBED_BATCH_DELAY=0.25
 - `QA_RERANK_ENABLED`：是否默认启用 rerank（默认开启，可按环境关闭）
 - `QA_RERANK_TOP_N`：rerank 处理候选上限
 - `QA_RERANK_LATENCY_BUDGET_MS`：rerank 软延迟预算
+- `QA_MAX_CHUNKS_PER_DOC`：单文档在上下文中可保留的 chunk 上限（默认 `2`）
+- `QA_TARGET_DISTINCT_DOCS`：优先覆盖的目标来源文档数（默认 `3`）
+- `QA_MIN_DISTINCT_DOCS_FOR_MULTI_SOURCE`：触发多来源倾向前的最小候选文档数（默认 `2`）
+- `QA_SINGLE_DOC_DOMINANCE_RATIO`：单文档证据优势比阈值（默认 `1.6`，触发后允许单来源主导）
+- `QA_DIVERSITY_RERANK_ENABLED`：是否开启轻量多样性重排（默认关闭）
+- `QA_DIVERSITY_LAMBDA`：多样性重排中“相关性优先”的权重（`0~1`，默认 `0.75`）
+- `QA_DIVERSITY_FETCH_K`：多样性重排参与候选数（默认 `24`）
+- `QA_REDUNDANCY_SIM_THRESHOLD`：同文档相邻 chunk 去冗余的文本相似度阈值（默认 `0.9`）
+- `QA_REDUNDANCY_ADJACENT_WINDOW`：相邻 chunk 去冗余窗口（默认 `1`）
 - `QA_QUERY_EXPANSION_ENABLED`：是否启用轻量 query expansion（默认关闭）
 - `QA_QUERY_EXPANSION_MAX_QUERIES`：扩展 query 数上限
 - `QA_STRICT_MIN_CITATIONS`：严格模式最低引用条数
@@ -78,7 +87,98 @@ EMBED_BATCH_DELAY=0.25
 
 - 当 pgvector 检索不可用（数据库、扩展或查询异常）时，会自动回退到应用层 cosine 检索，保证主链路可用性。
 - 系统日志会记录当前检索策略、召回数量、阈值和 rerank 是否执行，便于回归与排障。
+- Source diversity control 的目标是“相关性优先 + 抑制同文档霸榜”，而不是强制每次多文档引用。
+  - 单文档证据明显更强且足够回答时，会被 dominance guardrail 保护。
+  - 多文档存在互补证据时，会提升上下文来源覆盖，减少相邻重复 chunk 占满 context。
+  - 可通过关闭 `QA_DIVERSITY_RERANK_ENABLED` 或将 `QA_MAX_CHUNKS_PER_DOC` 调大来回退到更保守策略。
 - 当前仅支持文本型解析：`txt/md/pdf/docx`；不支持 OCR、图片理解和多模态解析。
+
+### Source Diversity Control（工程说明 + 验证跑法）
+
+这套能力的目标是：减少“同一文档多个相邻/高度相似 chunk 占满 topK 与 context”的情况。  
+它**不是**强制多文档引用，也不追求“文档数越多越好”。
+
+设计原则：
+
+- 单文档证据足够且更强时，允许单来源回答（由 dominance guardrail 保护）。
+- 多文档存在互补证据时，优先综合多个来源。
+- 整体仍然相关性优先；多样性只是一层轻量平衡。
+- strict 模式下若证据不足，仍应拒答或保守回答。
+
+关键机制：
+
+- `per-doc cap`：限制单文档 chunk 数，避免 context 被单篇文档淹没。
+- `dominance guardrail`：当首来源显著更强时，不为了“凑多来源”引入噪声。
+- `adjacent redundancy suppression`：抑制同文档相邻且高重叠 chunk。
+- `diversity rerank`（可开关）：在相关性前提下轻量拉开来源覆盖。
+- `doc-aware selection`：从候选中先做文档感知选择，再进入 context packing。
+
+主要配置项（含作用）：
+
+- `QA_MAX_CHUNKS_PER_DOC`：单文档最多保留多少 chunk；越小越能抑制单文档 flood。
+- `QA_TARGET_DISTINCT_DOCS`：优先覆盖的目标来源文档数，不是强制值。
+- `QA_MIN_DISTINCT_DOCS_FOR_MULTI_SOURCE`：候选来源不足时不强推多来源。
+- `QA_SINGLE_DOC_DOMINANCE_RATIO`：首来源相对次来源的优势阈值；越小越容易触发“单源可主导”。
+- `QA_DIVERSITY_RERANK_ENABLED`：开启/关闭轻量多样性重排。
+- `QA_DIVERSITY_LAMBDA`：多样性重排里“相关性权重”；越高越保守。
+- `QA_DIVERSITY_FETCH_K`：参与多样性重排的候选窗口。
+- `QA_REDUNDANCY_SIM_THRESHOLD`：相邻冗余判定阈值；越低越激进去重。
+
+#### baseline vs optimized：如何验证
+
+1) 准备数据：
+
+- 本仓库提供评测样例模板：
+  - `apps/api/evals/source_diversity_eval.sample.jsonl`
+  - `apps/api/evals/source_diversity_regression.sample.jsonl`
+- 注意：仓库**不附带真实已索引数据库内容**；上述 JSONL 仅是问题模板。
+
+2) baseline 配置示例（更接近“无多样性约束”）：
+
+```env
+QA_DIVERSITY_RERANK_ENABLED=false
+QA_MAX_CHUNKS_PER_DOC=999
+QA_TARGET_DISTINCT_DOCS=1
+QA_MIN_DISTINCT_DOCS_FOR_MULTI_SOURCE=1
+QA_SINGLE_DOC_DOMINANCE_RATIO=999
+QA_REDUNDANCY_SIM_THRESHOLD=0.999
+```
+
+3) optimized 配置示例（启用本轮能力）：
+
+```env
+QA_DIVERSITY_RERANK_ENABLED=true
+QA_DIVERSITY_LAMBDA=0.18
+QA_DIVERSITY_FETCH_K=24
+QA_MAX_CHUNKS_PER_DOC=2
+QA_TARGET_DISTINCT_DOCS=3
+QA_MIN_DISTINCT_DOCS_FOR_MULTI_SOURCE=2
+QA_SINGLE_DOC_DOMINANCE_RATIO=1.35
+QA_REDUNDANCY_SIM_THRESHOLD=0.92
+```
+
+4) 运行 eval（两轮：先 baseline，再 optimized）：
+
+```bash
+cd apps/api
+python scripts/eval_rag.py --input evals/source_diversity_eval.sample.jsonl --output scripts/eval_source_diversity_baseline.json
+python scripts/eval_rag.py --input evals/source_diversity_eval.sample.jsonl --output scripts/eval_source_diversity_optimized.json
+```
+
+5) 重点观察指标：
+
+- `distinct_docs_in_topk`
+- `distinct_docs_in_context`
+- `same_doc_chunk_ratio`
+- `adjacent_chunk_redundancy_rate`
+- `multi_source_answer_rate`
+- `citation_source_diversity`
+- `single_source_when_sufficient_rate`
+- `unsupported_multi_source_rate`
+- `latency_p50_ms`
+- `latency_p95_ms`
+
+结论要求：没有真实已索引数据时，不应伪造 baseline vs optimized 数值；只能报告“样例与跑法已准备，待真实数据验证”。
 
 ## 前端环境变量
 
