@@ -230,6 +230,5 @@ python scripts/eval_rag.py --input evals/source_diversity_eval.sample.jsonl --ou
 仓库已提供可直接部署的 `web + api + db` Compose 方案：
 
 - 启动文档见 `docs/deployment.md` 的“Docker Compose 部署（单机 2 CPU / 4GB）”章节
-- 默认仅暴露 `127.0.0.1:8080`，便于宿主机再反向代理
+- 实验室内网访问地址为 `http://10.65.218.208:8080`
 - LLM / embedding 仍通过外部 Provider API，不在本机推理
-
