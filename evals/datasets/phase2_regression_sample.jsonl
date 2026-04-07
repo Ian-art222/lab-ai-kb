@@ -1,0 +1,7 @@
+{"id":"basic_qa_1","query":"系统支持哪些检索模式？","scenario":"basic_qa","expected_behavior":"answer_with_reference"}
+{"id":"multi_doc_1","query":"比较A方案和B方案在吞吐和延迟上的差异","scenario":"multi_doc_synthesis","expected_behavior":"synthesize_multiple_sources"}
+{"id":"comparison_1","query":"请比较混合检索与纯语义检索的优缺点","scenario":"comparison","expected_behavior":"comparison_with_citations"}
+{"id":"abstain_1","query":"库里没有提到的外部政策是什么？","scenario":"no_answer","expected_behavior":"abstain"}
+{"id":"conflict_1","query":"文档中关于同一指标有冲突时应如何处理？","scenario":"conflicting_evidence","expected_behavior":"flag_conflict"}
+{"id":"noise_1","query":"乱码文档能否直接用于可信回答？","scenario":"noisy_text","expected_behavior":"degrade_or_abstain"}
+{"id":"source_bias_1","query":"如果只有单一来源反复出现是否有风险？","scenario":"single_source_bias","expected_behavior":"risk_flag"}

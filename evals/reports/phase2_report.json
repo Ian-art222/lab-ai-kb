@@ -1,0 +1,67 @@
+{
+  "dataset": "evals/datasets/phase2_regression_sample.jsonl",
+  "generated_at": "2026-04-07T11:02:19.789837",
+  "summary": {
+    "total": 7,
+    "passed": 6,
+    "failed": 1
+  },
+  "results": [
+    {
+      "id": "basic_qa_1",
+      "scenario": "basic_qa",
+      "query": "系统支持哪些检索模式？",
+      "expected_behavior": "answer_with_reference",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    },
+    {
+      "id": "multi_doc_1",
+      "scenario": "multi_doc_synthesis",
+      "query": "比较A方案和B方案在吞吐和延迟上的差异",
+      "expected_behavior": "synthesize_multiple_sources",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    },
+    {
+      "id": "comparison_1",
+      "scenario": "comparison",
+      "query": "请比较混合检索与纯语义检索的优缺点",
+      "expected_behavior": "comparison_with_citations",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    },
+    {
+      "id": "abstain_1",
+      "scenario": "no_answer",
+      "query": "库里没有提到的外部政策是什么？",
+      "expected_behavior": "abstain",
+      "passed": false,
+      "reason": "abstain_expected_for_manual_review"
+    },
+    {
+      "id": "conflict_1",
+      "scenario": "conflicting_evidence",
+      "query": "文档中关于同一指标有冲突时应如何处理？",
+      "expected_behavior": "flag_conflict",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    },
+    {
+      "id": "noise_1",
+      "scenario": "noisy_text",
+      "query": "乱码文档能否直接用于可信回答？",
+      "expected_behavior": "degrade_or_abstain",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    },
+    {
+      "id": "source_bias_1",
+      "scenario": "single_source_bias",
+      "query": "如果只有单一来源反复出现是否有风险？",
+      "expected_behavior": "risk_flag",
+      "passed": true,
+      "reason": "baseline_rule_pass"
+    }
+  ]
+}

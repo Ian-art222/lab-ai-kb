@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime
 
@@ -15,7 +16,9 @@ from app.models.file_record import FileRecord
 from app.models.folder import Folder
 from app.models.knowledge import KnowledgeChunk, QACitation, QAMessage, QARetrievalTrace, QASession
 from app.models.system_setting import SystemSetting
+from app.services.failure_cases import build_failure_case, sink_failure_case
 from app.services.model_service import chat_completion, embed_texts
+from app.services.reason_codes import QAReasonCode, normalize_reason_code
 from app.services.settings_service import build_embedding_index_standard
 
 MIN_SIMILARITY_SCORE = 0.25
@@ -125,6 +128,10 @@ def _build_retrieval_meta(
     normalized_query: str | None = None,
     rewritten_queries: list[str] | None = None,
     abstain_reason: str | None = None,
+    abstain_reason_code: str | None = None,
+    failure_reason_code: str | None = None,
+    trace_id: str | None = None,
+    request_id: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -171,6 +178,10 @@ def _build_retrieval_meta(
         "normalized_query": normalized_query,
         "rewritten_queries": rewritten_queries or [],
         "abstain_reason": abstain_reason,
+        "abstain_reason_code": abstain_reason_code,
+        "failure_reason_code": failure_reason_code,
+        "trace_id": trace_id,
+        "request_id": request_id,
     }
 
 
@@ -1410,6 +1421,8 @@ def ask_question(
 
     retrieval_mode = _normalize_retrieval_mode(app_settings.qa_retrieval_mode)
     normalized_query = " ".join((question or "").split()).strip()
+    trace_id = uuid.uuid4().hex
+    request_id = uuid.uuid4().hex
     query_variants = _build_query_variants(question)
     try:
         query_embeddings = embed_texts(
@@ -1485,7 +1498,10 @@ def ask_question(
             parent_deduped_groups=0,
             normalized_query=normalized_query,
             rewritten_queries=query_variants,
-            abstain_reason="no_compatible_content",
+            abstain_reason="未检索到可用知识片段",
+            abstain_reason_code=QAReasonCode.NO_RETRIEVAL_HIT.value,
+            trace_id=trace_id,
+            request_id=request_id,
         )
         return {
             "answer": answer,
@@ -1683,6 +1699,8 @@ def ask_question(
                 diversity_rerank_fetch_k=diversity_rerank_fetch_k,
                 normalized_query=normalized_query,
                 rewritten_queries=query_variants,
+                trace_id=trace_id,
+                request_id=request_id,
             )
             evidence_bundles = _assemble_evidence_bundles(references)
             return {
@@ -1782,6 +1800,8 @@ def ask_question(
                     diversity_rerank_fetch_k=diversity_rerank_fetch_k,
                     normalized_query=normalized_query,
                     rewritten_queries=query_variants,
+                    trace_id=trace_id,
+                    request_id=request_id,
                 )
                 evidence_bundles = _assemble_evidence_bundles(references)
                 return {
@@ -1847,7 +1867,12 @@ def ask_question(
             parent_deduped_groups=0,
             normalized_query=normalized_query,
             rewritten_queries=query_variants,
-            abstain_reason=("low_confidence_retrieval" if low_confidence else "no_candidates"),
+            abstain_reason=("检索结果置信度不足" if low_confidence else "未检索到可用知识片段"),
+            abstain_reason_code=(
+                QAReasonCode.LOW_RETRIEVAL_CONFIDENCE.value if low_confidence else QAReasonCode.NO_RETRIEVAL_HIT.value
+            ),
+            trace_id=trace_id,
+            request_id=request_id,
         )
         return {
             "answer": answer,
@@ -1917,10 +1942,26 @@ def persist_retrieval_trace(
     """Persist one retrieval trace row (success or failure)."""
     meta = retrieval_meta or {}
     dbg = debug_json if debug_json is not None else (dict(meta) if meta else None)
+    trace_id = meta.get("trace_id") or uuid.uuid4().hex
+    abstain_reason_code = normalize_reason_code(meta.get("abstain_reason_code") or meta.get("abstain_reason"))
+    failure_reason_code = normalize_reason_code(
+        meta.get("failure_reason_code")
+        or (dbg.get("failure_reason_code") if isinstance(dbg, dict) else None)
+    )
+    is_abstained = bool(abstain_reason_code)
+    failed = bool(
+        failure_reason_code
+        or (answer_source == "error")
+        or (isinstance(dbg, dict) and (dbg.get("code") or dbg.get("message")))
+    )
     trace = QARetrievalTrace(
         session_id=session_id,
         assistant_message_id=assistant_message_id,
+        trace_id=trace_id,
+        request_id=meta.get("request_id"),
         question=question,
+        normalized_query=meta.get("normalized_query"),
+        rewritten_queries_json=meta.get("rewritten_queries"),
         retrieval_mode=meta.get("retrieval_mode"),
         fusion_method=meta.get("fusion_method"),
         top_k=meta.get("top_k"),
@@ -1930,6 +1971,27 @@ def persist_retrieval_trace(
         selected_chunks=meta.get("selected_chunks"),
         score_threshold_applied=meta.get("score_threshold_applied"),
         answer_source=answer_source or meta.get("answer_source"),
+        retrieval_strategy=meta.get("retrieval_strategy"),
+        filters_json=meta.get("filters"),
+        selected_evidence_json=meta.get("selected_evidence"),
+        evidence_bundles_json=meta.get("evidence_bundles"),
+        strict_mode=meta.get("strict_mode"),
+        is_abstained=is_abstained,
+        failed=failed,
+        abstain_reason=abstain_reason_code.value if abstain_reason_code else None,
+        failure_reason=(
+            failure_reason_code.value
+            if failure_reason_code
+            else (QAReasonCode.INTERNAL_ERROR.value if failed else None)
+        ),
+        model_name=meta.get("model_name"),
+        token_usage_json=meta.get("token_usage"),
+        latency_ms=meta.get("latency_ms"),
+        latency_breakdown_json=meta.get("latency_breakdown"),
+        task_type=meta.get("task_type"),
+        tool_traces_json=meta.get("tool_traces_json"),
+        workflow_steps_json=meta.get("workflow_steps_json"),
+        session_context_json=meta.get("session_context_json"),
         rerank_enabled=meta.get("rerank_enabled"),
         rerank_applied=meta.get("rerank_applied"),
         rerank_model_name=meta.get("rerank_model_name"),
@@ -1937,3 +1999,19 @@ def persist_retrieval_trace(
     )
     db.add(trace)
     db.commit()
+    if is_abstained or failed:
+        reason_code = (
+            (failure_reason_code.value if failure_reason_code else None)
+            or (abstain_reason_code.value if abstain_reason_code else None)
+            or QAReasonCode.INTERNAL_ERROR.value
+        )
+        sink_failure_case(
+            build_failure_case(
+                query=question,
+                trace_id=trace_id,
+                request_id=meta.get("request_id"),
+                reason_code=reason_code,
+                answer_summary=(answer_source or "unknown"),
+                retrieved_refs=meta.get("selected_evidence"),
+            )
+        )

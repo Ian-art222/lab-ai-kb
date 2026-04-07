@@ -1,0 +1,1 @@
+{"id": "abstain_1", "scenario": "no_answer", "query": "库里没有提到的外部政策是什么？", "expected_behavior": "abstain", "passed": false, "reason": "abstain_expected_for_manual_review"}

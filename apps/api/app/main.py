@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.api.auth import router as auth_router
+from app.api.admin_diagnostics import router as admin_diagnostics_router
 
 app = FastAPI(title=settings.app_name)
 
@@ -26,6 +27,7 @@ app.include_router(files_router)
 app.include_router(qa_router)
 app.include_router(users_router)
 app.include_router(settings_router)
+app.include_router(admin_diagnostics_router)
 
 
 @app.get("/")
