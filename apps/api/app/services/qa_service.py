@@ -157,6 +157,12 @@ def _build_retrieval_meta(
     compare_result: dict | None = None,
     clarification_needed: bool | None = None,
     workflow_summary: str | None = None,
+    source_count: int | None = None,
+    dominant_source_ratio: float | None = None,
+    multi_source_coverage: float | None = None,
+    fallback_triggered: bool | None = None,
+    retrieval_rounds: int | None = None,
+    stop_reason: str | None = None,
 ) -> dict:
     """Normalized retrieval_meta for API responses; keeps legacy min_score alongside min_similarity_score."""
     return {
@@ -220,6 +226,12 @@ def _build_retrieval_meta(
         "compare_result": compare_result,
         "clarification_needed": clarification_needed,
         "workflow_summary": workflow_summary,
+        "source_count": source_count,
+        "dominant_source_ratio": dominant_source_ratio,
+        "multi_source_coverage": multi_source_coverage,
+        "fallback_triggered": fallback_triggered,
+        "retrieval_rounds": retrieval_rounds,
+        "stop_reason": stop_reason,
     }
 
 
@@ -621,6 +633,87 @@ def _assemble_evidence_bundles(references: list[dict]) -> dict:
         "primary_sources": primary,
         "supplementary_sources": supplemental,
         "source_count": len(ranked),
+    }
+
+
+def _compute_source_coverage_metrics(references: list[dict], *, top_k: int) -> dict[str, float | int]:
+    by_file: dict[int, int] = defaultdict(int)
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        try:
+            file_id = int(ref.get("file_id"))
+        except (TypeError, ValueError):
+            continue
+        by_file[file_id] += 1
+    total_refs = sum(by_file.values())
+    source_count = len(by_file)
+    dominant_source_ratio = (max(by_file.values()) / total_refs) if total_refs else 0.0
+    multi_source_coverage = source_count / max(1, min(top_k, 3))
+    return {
+        "source_count": source_count,
+        "dominant_source_ratio": round(dominant_source_ratio, 4),
+        "multi_source_coverage": round(min(1.0, multi_source_coverage), 4),
+    }
+
+
+def _build_compare_result(compare_targets: list[str], references: list[dict]) -> dict[str, Any]:
+    target_a = compare_targets[0] if len(compare_targets) >= 1 else "A"
+    target_b = compare_targets[1] if len(compare_targets) >= 2 else "B"
+    side_a_evidence: list[dict[str, Any]] = []
+    side_b_evidence: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    for ref in references:
+        if not isinstance(ref, dict):
+            continue
+        candidate = {
+            "file_id": ref.get("file_id"),
+            "file_name": ref.get("file_name"),
+            "chunk_id": ref.get("chunk_id"),
+            "chunk_index": ref.get("chunk_index"),
+            "snippet": ref.get("snippet"),
+            "score": ref.get("score"),
+        }
+        signal = " ".join(
+            [
+                str(ref.get("file_name") or ""),
+                str(ref.get("section_title") or ""),
+                str(ref.get("snippet") or ""),
+            ]
+        ).lower()
+        if target_a and target_a.lower() in signal and (not target_b or target_b.lower() not in signal):
+            side_a_evidence.append(candidate)
+        elif target_b and target_b.lower() in signal and (not target_a or target_a.lower() not in signal):
+            side_b_evidence.append(candidate)
+        else:
+            ambiguous.append(candidate)
+    for idx, item in enumerate(ambiguous):
+        if idx % 2 == 0:
+            side_a_evidence.append(item)
+        else:
+            side_b_evidence.append(item)
+
+    common_points: list[str] = []
+    differences: list[str] = []
+    conflicts: list[str] = []
+    if side_a_evidence and side_b_evidence:
+        common_points.append("两侧均检索到可引用证据。")
+    else:
+        differences.append("两侧证据数量不对称，比较结论需保守。")
+    if abs(len(side_a_evidence) - len(side_b_evidence)) >= 2:
+        conflicts.append("两侧证据覆盖明显不均衡，存在证据偏斜风险。")
+
+    evidence_sufficiency = bool(side_a_evidence and side_b_evidence)
+    return {
+        "comparison_targets": compare_targets,
+        "side_a_label": target_a,
+        "side_b_label": target_b,
+        "side_a_evidence": side_a_evidence,
+        "side_b_evidence": side_b_evidence,
+        "common_points": common_points,
+        "differences": differences,
+        "conflicts": conflicts,
+        "evidence_sufficiency": evidence_sufficiency,
     }
 
 
@@ -1556,6 +1649,12 @@ def ask_question(
             selected_skill=selected_skill,
             clarification_needed=True,
             workflow_summary="clarify_before_retrieval",
+            source_count=0,
+            dominant_source_ratio=0.0,
+            multi_source_coverage=0.0,
+            fallback_triggered=False,
+            retrieval_rounds=0,
+            stop_reason="clarification_required",
         )
         return {
             "answer": clarification_text,
@@ -1662,6 +1761,12 @@ def ask_question(
             planner_meta=planned,
             clarification_needed=False,
             workflow_summary="abstain_or_general_fallback",
+            source_count=0,
+            dominant_source_ratio=0.0,
+            multi_source_coverage=0.0,
+            fallback_triggered=False,
+            retrieval_rounds=0,
+            stop_reason="insufficient_after_round1",
         )
         return {
             "answer": answer,
@@ -1801,6 +1906,19 @@ def ask_question(
     stop_reason = "enough_evidence" if selected_reliable_matches else (
         "fallback_triggered_but_insufficient" if fallback_triggered else "insufficient_after_round1"
     )
+    source_skew_detected = source_count > 0 and dominant_source_ratio >= 0.8
+    if source_skew_detected:
+        workflow_steps.append({"step": "single_source_skew_detected", "status": "warning"})
+        tool_traces.append(
+            summarize_tool_trace(
+                "single_source_skew_warning",
+                {
+                    "source_count": source_count,
+                    "dominant_source_ratio": dominant_source_ratio,
+                    "multi_source_coverage": multi_source_coverage,
+                },
+            )
+        )
     logger.info(
         "QA retrieval mode=%s strategy=%s compatible_files=%s semantic=%s lexical=%s fused=%s reliable=%s selected=%s threshold=%.4f rerank=%s diversity=%s unique_docs_before=%s unique_docs_after=%s dominance=%s per_doc=%s",
         retrieval_mode,
@@ -1875,6 +1993,8 @@ def ask_question(
                 "你是一个只依据用户给定的知识库片段作答的助手；无充分依据时不臆测，也不使用课外知识兜底。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            if source_skew_detected:
+                answer = "说明：当前结论主要来自单一来源，建议结合更多资料复核。\n" + answer
             output_guardrail = apply_output_guardrail(answer=answer, references=references, compare_mode=task_type == TASK_COMPARE)
             tool_traces.append(summarize_tool_trace("output_guardrail", output_guardrail))
             if not _is_grounded_answer(answer, references):
@@ -1885,6 +2005,10 @@ def ask_question(
                 )
             if task_type == TASK_COMPARE:
                 workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
+            coverage_metrics = _compute_source_coverage_metrics(references, top_k=top_k)
+            compare_result_payload = _build_compare_result(compare_targets, references) if task_type == TASK_COMPARE else None
+            if task_type == TASK_COMPARE and compare_result_payload and not compare_result_payload.get("evidence_sufficiency"):
+                answer = "说明：当前比较两侧证据不对称，结论需谨慎。\n" + answer
             elif task_type == TASK_MULTI_DOC_SYNTHESIS:
                 workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
             logger.info("strict evidence decision=accept citations=%s", len(references))
@@ -1943,14 +2067,17 @@ def ask_question(
                     "retrieval_rounds": retrieval_rounds,
                     "fallback_triggered": fallback_triggered,
                     "stop_reason": stop_reason,
+                    **coverage_metrics,
                 },
-                compare_result=(
-                    {"comparison_targets": compare_targets, "evidence_by_side": {}, "evidence_sufficiency": len(references) >= 2}
-                    if task_type == TASK_COMPARE
-                    else None
-                ),
+                compare_result=compare_result_payload,
                 clarification_needed=False,
                 workflow_summary=("compare_skill" if task_type == TASK_COMPARE else selected_skill),
+                source_count=int(coverage_metrics["source_count"]),
+                dominant_source_ratio=float(coverage_metrics["dominant_source_ratio"]),
+                multi_source_coverage=float(coverage_metrics["multi_source_coverage"]),
+                fallback_triggered=fallback_triggered,
+                retrieval_rounds=retrieval_rounds,
+                stop_reason=stop_reason,
             )
             evidence_bundles = _assemble_evidence_bundles(references)
             return {
@@ -2024,6 +2151,8 @@ def ask_question(
                 "你优先依据用户提供的知识库资料作答；仅在资料边界清晰的前提下可谨慎补充常识，不伪造知识库内容。"
             )
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
+            if source_skew_detected:
+                answer = "说明：当前结论主要来自单一来源，建议结合更多资料复核。\n" + answer
             output_guardrail = apply_output_guardrail(answer=answer, references=references, compare_mode=task_type == TASK_COMPARE)
             tool_traces.append(summarize_tool_trace("output_guardrail", output_guardrail))
             min_citations = max(1, int(app_settings.qa_min_grounded_citations))
@@ -2038,6 +2167,10 @@ def ask_question(
                 logger.info("non-strict evidence decision=accept citations=%s", len(references))
                 if task_type == TASK_COMPARE:
                     workflow_steps.append({"step": "compare_evidence_sets", "status": "completed"})
+                coverage_metrics = _compute_source_coverage_metrics(references, top_k=top_k)
+                compare_result_payload = _build_compare_result(compare_targets, references) if task_type == TASK_COMPARE else None
+                if task_type == TASK_COMPARE and compare_result_payload and not compare_result_payload.get("evidence_sufficiency"):
+                    answer = "说明：当前比较两侧证据不对称，结论需谨慎。\n" + answer
                 elif task_type == TASK_MULTI_DOC_SYNTHESIS:
                     workflow_steps.append({"step": "synthesize_with_citations", "status": "completed"})
                 retrieval_meta = _build_retrieval_meta(
@@ -2095,17 +2228,17 @@ def ask_question(
                         "retrieval_rounds": retrieval_rounds,
                         "fallback_triggered": fallback_triggered,
                         "stop_reason": stop_reason,
-                        "source_count": source_count,
-                        "dominant_source_ratio": dominant_source_ratio,
-                        "multi_source_coverage": multi_source_coverage,
+                        **coverage_metrics,
                     },
-                    compare_result=(
-                        {"comparison_targets": compare_targets, "evidence_by_side": {}, "evidence_sufficiency": len(references) >= 2}
-                        if task_type == TASK_COMPARE
-                        else None
-                    ),
+                    compare_result=compare_result_payload,
                     clarification_needed=False,
                     workflow_summary=("compare_skill" if task_type == TASK_COMPARE else selected_skill),
+                    source_count=int(coverage_metrics["source_count"]),
+                    dominant_source_ratio=float(coverage_metrics["dominant_source_ratio"]),
+                    multi_source_coverage=float(coverage_metrics["multi_source_coverage"]),
+                    fallback_triggered=fallback_triggered,
+                    retrieval_rounds=retrieval_rounds,
+                    stop_reason=stop_reason,
                 )
                 evidence_bundles = _assemble_evidence_bundles(references)
                 return {
@@ -2197,6 +2330,12 @@ def ask_question(
             },
             clarification_needed=False,
             workflow_summary="abstain_skill",
+            source_count=source_count,
+            dominant_source_ratio=dominant_source_ratio,
+            multi_source_coverage=multi_source_coverage,
+            fallback_triggered=fallback_triggered,
+            retrieval_rounds=retrieval_rounds,
+            stop_reason=stop_reason,
         )
         return {
             "answer": answer,

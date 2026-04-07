@@ -64,6 +64,14 @@
             <el-table-column label="evidence" width="95">
               <template #default="scope">{{ evidenceCount(scope.row) }}</template>
             </el-table-column>
+            <el-table-column label="coverage" min-width="170">
+              <template #default="scope">
+                src={{ scope.row.source_count ?? '-' }} · dom={{ asPct(scope.row.dominant_source_ratio) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="fallback" width="95">
+              <template #default="scope">{{ scope.row.fallback_triggered ? 'yes' : '-' }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="140" fixed="right">
               <template #default="scope">
                 <el-button link type="primary" @click="openDetail(scope.row.trace_id)">查看详情</el-button>
@@ -109,6 +117,19 @@
             <el-descriptions-item label="reason_code">
               {{ detail.abstain_reason || detail.failure_reason || '-' }}
             </el-descriptions-item>
+            <el-descriptions-item label="task / scope / skill">
+              {{ detail.task_type || '-' }} / {{ detail.selected_scope || '-' }} / {{ detail.selected_skill || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="workflow_summary">
+              {{ (detail.debug_json || {}).workflow_summary || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="fallback / rounds / stop">
+              {{ detail.fallback_triggered ?? '-' }} / {{ detail.retrieval_rounds ?? '-' }} / {{ detail.stop_reason || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="source coverage">
+              source_count={{ detail.source_count ?? '-' }}, dominant_ratio={{ asPct(detail.dominant_source_ratio) }},
+              multi_source_coverage={{ asPct(detail.multi_source_coverage) }}
+            </el-descriptions-item>
             <el-descriptions-item label="retrieval_meta">
               <pre>{{ JSON.stringify({
                 retrieval_strategy: detail.retrieval_strategy,
@@ -117,6 +138,24 @@
                 latency_ms: detail.latency_ms,
                 token_usage: detail.token_usage,
               }, null, 2) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="planner_meta">
+              <pre>{{ pretty(detail.planner_meta) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="workflow_steps">
+              <pre>{{ pretty(detail.workflow_steps) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="tool_traces">
+              <pre>{{ pretty(detail.tool_traces) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="guardrail_events">
+              <pre>{{ pretty(detail.guardrail_events) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="compare_result">
+              <pre>{{ pretty(detail.compare_result) }}</pre>
+            </el-descriptions-item>
+            <el-descriptions-item label="clarification_needed">
+              {{ detail.clarification_needed ?? '-' }}
             </el-descriptions-item>
             <el-descriptions-item label="evidence_bundles">
               <pre>{{ JSON.stringify(detail.evidence_bundles || {}, null, 2) }}</pre>
@@ -197,6 +236,15 @@ function snippet(v: string): string {
 
 function evidenceCount(item: TraceItem): number {
   return item.selected_evidence?.length || 0
+}
+
+function pretty(payload: unknown): string {
+  return JSON.stringify(payload ?? {}, null, 2)
+}
+
+function asPct(v?: number | null): string {
+  if (v === undefined || v === null) return '-'
+  return `${(v * 100).toFixed(0)}%`
 }
 
 async function loadReasonStats() {

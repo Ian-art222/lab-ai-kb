@@ -34,6 +34,14 @@ class TraceListItem(BaseModel):
     selected_skill: str | None = None
     planner_meta: dict[str, Any] | None = None
     guardrail_events: list[dict[str, Any]] | None = None
+    fallback_triggered: bool | None = None
+    retrieval_rounds: int | None = None
+    stop_reason: str | None = None
+    source_count: int | None = None
+    dominant_source_ratio: float | None = None
+    multi_source_coverage: float | None = None
+    compare_result: dict[str, Any] | None = None
+    clarification_needed: bool | None = None
     created_at: datetime
 
 

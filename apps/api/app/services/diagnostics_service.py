@@ -53,6 +53,23 @@ def _extract_guardrail_events(tool_traces: list | None) -> list[dict]:
             events.append(item)
     return events
 
+
+def _debug_field(row: QARetrievalTrace, key: str):
+    if isinstance(row.debug_json, dict):
+        return row.debug_json.get(key)
+    return None
+
+
+def _debug_or_planner(row: QARetrievalTrace, key: str):
+    direct = _debug_field(row, key)
+    if direct is not None:
+        return direct
+    if isinstance(row.debug_json, dict):
+        planner = row.debug_json.get("planner_meta")
+        if isinstance(planner, dict):
+            return planner.get(key)
+    return None
+
 def list_traces(
     db: Session,
     *,
@@ -119,6 +136,14 @@ def list_traces(
             "selected_skill": (row.debug_json or {}).get("selected_skill") if isinstance(row.debug_json, dict) else None,
             "planner_meta": (row.debug_json or {}).get("planner_meta") if isinstance(row.debug_json, dict) else None,
             "guardrail_events": _extract_guardrail_events(row.tool_traces_json),
+            "fallback_triggered": _debug_or_planner(row, "fallback_triggered"),
+            "retrieval_rounds": _debug_or_planner(row, "retrieval_rounds"),
+            "stop_reason": _debug_or_planner(row, "stop_reason"),
+            "source_count": _debug_or_planner(row, "source_count"),
+            "dominant_source_ratio": _debug_or_planner(row, "dominant_source_ratio"),
+            "multi_source_coverage": _debug_or_planner(row, "multi_source_coverage"),
+            "compare_result": _debug_field(row, "compare_result"),
+            "clarification_needed": _debug_field(row, "clarification_needed"),
             "created_at": row.created_at,
             "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),
         }
@@ -159,6 +184,14 @@ def get_trace_detail(db: Session, *, trace_id: str) -> dict:
         "selected_skill": (row.debug_json or {}).get("selected_skill") if isinstance(row.debug_json, dict) else None,
         "planner_meta": (row.debug_json or {}).get("planner_meta") if isinstance(row.debug_json, dict) else None,
         "guardrail_events": _extract_guardrail_events(row.tool_traces_json),
+        "fallback_triggered": _debug_or_planner(row, "fallback_triggered"),
+        "retrieval_rounds": _debug_or_planner(row, "retrieval_rounds"),
+        "stop_reason": _debug_or_planner(row, "stop_reason"),
+        "source_count": _debug_or_planner(row, "source_count"),
+        "dominant_source_ratio": _debug_or_planner(row, "dominant_source_ratio"),
+        "multi_source_coverage": _debug_or_planner(row, "multi_source_coverage"),
+        "compare_result": _debug_field(row, "compare_result"),
+        "clarification_needed": _debug_field(row, "clarification_needed"),
         "debug_json": row.debug_json,
         "created_at": row.created_at,
         "source_file_ids": _extract_source_file_ids(row.selected_evidence_json, row.evidence_bundles_json),
