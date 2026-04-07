@@ -30,6 +30,10 @@ class TraceListItem(BaseModel):
     tool_traces: list[dict[str, Any]] | None = None
     workflow_steps: list[dict[str, Any]] | None = None
     session_context: dict[str, Any] | None = None
+    selected_scope: str | None = None
+    selected_skill: str | None = None
+    planner_meta: dict[str, Any] | None = None
+    guardrail_events: list[dict[str, Any]] | None = None
     created_at: datetime
 
 
