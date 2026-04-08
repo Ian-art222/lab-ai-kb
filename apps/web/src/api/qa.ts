@@ -61,6 +61,7 @@ export interface RetrievalMeta {
   multi_source_coverage?: number | null
   clarification_needed?: boolean | null
   compare_result?: Record<string, unknown> | null
+  selected_scope?: string | null
 }
 
 export interface AskResponse {
