@@ -13,9 +13,12 @@
 
       <div class="body" :class="{ single: !dualPane }">
         <section ref="leftPaneRef" class="pane left" @scroll="onLeftScroll">
-          <div v-for="p in pageCount" :key="p" :data-page="p" class="pdf-page-wrap">
-            <canvas :ref="(el) => bindCanvas(el, p)" class="pdf-canvas" />
-          </div>
+          <div v-if="pdfLoadError" class="pdf-load-error">{{ pdfLoadError }}</div>
+          <template v-else>
+            <div v-for="p in pageCount" :key="p" :data-page="p" class="pdf-page-wrap">
+              <canvas :ref="(el) => bindCanvas(el, p)" class="pdf-canvas" />
+            </div>
+          </template>
         </section>
 
         <section v-if="dualPane" ref="rightPaneRef" class="pane right" @scroll="onRightScroll">
@@ -75,9 +78,9 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import * as pdfjsLib from 'pdfjs-dist'
-import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import workerSrcImport from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import AdminLayout from '../layouts/AdminLayout.vue'
-import { apiFetch, readApiErrorMessage } from '../api/client'
+import { apiFetchBinary, readApiErrorMessage } from '../api/client'
 import {
   addAttachmentApi,
   askPdfQaApi,
@@ -95,7 +98,11 @@ import {
   triggerPdfTranslateApi,
 } from '../api/pdfDocuments'
 
-;(pdfjsLib as any).GlobalWorkerOptions.workerSrc = workerSrc
+// Vite：worker 资源 URL 需相对当前模块解析，否则在子路径部署或打包后可能 404 → PDF.js 报 Failed to fetch
+;(pdfjsLib as any).GlobalWorkerOptions.workerSrc = new URL(
+  workerSrcImport,
+  import.meta.url,
+).href
 
 const route = useRoute()
 const router = useRouter()
@@ -107,6 +114,7 @@ const leftPaneRef = ref<HTMLElement | null>(null)
 const rightPaneRef = ref<HTMLElement | null>(null)
 
 const docInfo = ref<any>(null)
+const pdfLoadError = ref<string | null>(null)
 const pageCount = ref(0)
 const translating = ref(false)
 const translationStatus = ref('not_started')
@@ -248,21 +256,30 @@ onMounted(async () => {
     return
   }
 
-  // PDF.js 用 URL 直连不会带 JWT，会 401 → 左侧空白；改为 apiFetch + ArrayBuffer
+  // 二进制下载：专用 apiFetchBinary，避免与 JSON 封装混用；URL 使用 buildApiUrl 保证绝对地址
   try {
-    const res = await apiFetch(`/files/${fileId}/download`)
+    pdfLoadError.value = null
+    const res = await apiFetchBinary(`/files/${fileId}/download`)
     if (!res.ok) {
       throw new Error(await readApiErrorMessage(res, '下载 PDF 失败'))
     }
     const buf = await res.arrayBuffer()
+    if (buf.byteLength === 0) {
+      throw new Error('下载的 PDF 为空（0 字节）')
+    }
     const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buf) })
     pdfDoc = await loadingTask.promise
     pageCount.value = pdfDoc.numPages || 0
     if (!pageCount.value) {
-      ElMessage.warning('该 PDF 页数为 0，无法渲染')
+      const msg = '该 PDF 页数为 0，无法渲染'
+      pdfLoadError.value = msg
+      ElMessage.warning(msg)
     }
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : '加载 PDF 失败')
+    const msg =
+      e instanceof Error ? e.message : typeof e === 'string' ? e : '加载 PDF 失败'
+    pdfLoadError.value = `PDF 加载失败：${msg}`
+    ElMessage.error(pdfLoadError.value)
   }
 
   try {
@@ -294,6 +311,7 @@ onMounted(async () => {
 .body.single { grid-template-columns: 1fr 320px; }
 .pane { border:1px solid #ddd; border-radius:8px; overflow:auto; padding:8px; background:#fff; }
 .sidebar { border:1px solid #ddd; border-radius:8px; overflow:auto; padding:8px; }
+.pdf-load-error { padding: 16px; color: #c00; font-size: 14px; line-height: 1.5; }
 .pdf-page-wrap { margin-bottom: 12px; }
 .pdf-canvas { width: 100%; background: #fafafa; }
 .tr-item { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }

@@ -34,6 +34,47 @@ function handleUnauthorized() {
   window.location.href = loginHref()
 }
 
+/**
+ * 拼出浏览器可请求的完整 API URL（相对 API_BASE 时固定到当前页面 origin）。
+ * 避免在部分环境下相对路径 `/api/...` 与 PDF.js worker / 子路径部署组合时出现异常。
+ */
+export function buildApiUrl(path: string): string {
+  const p = path.startsWith('/') ? path : `/${path}`
+  if (API_BASE.startsWith('http://') || API_BASE.startsWith('https://')) {
+    const base = API_BASE.endsWith('/') ? API_BASE.slice(0, -1) : API_BASE
+    return `${base}${p}`
+  }
+  const basePath = API_BASE.startsWith('/') ? API_BASE : `/${API_BASE}`
+  const joined = `${basePath.replace(/\/$/, '')}${p}`
+  return new URL(joined, window.location.origin).href
+}
+
+/** 二进制下载（PDF 等）：带 JWT，返回原生 Response，不做 JSON 解析。 */
+export async function apiFetchBinary(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers ?? {})
+  const token = localStorage.getItem('token')?.trim()
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const url = buildApiUrl(path)
+  let response: Response
+  try {
+    response = await fetch(url, {
+      ...init,
+      headers,
+    })
+  } catch (error) {
+    throw toNetworkError(error, url)
+  }
+  if (response.status === 401) {
+    handleUnauthorized()
+  }
+  return response
+}
+
 export async function apiFetch(
   path: string,
   init: RequestInit = {},
@@ -45,7 +86,7 @@ export async function apiFetch(
     headers.set('Authorization', `Bearer ${token}`)
   }
 
-  const url = `${API_BASE}${path}`
+  const url = buildApiUrl(path)
   let response: Response
   try {
     response = await fetch(url, {
