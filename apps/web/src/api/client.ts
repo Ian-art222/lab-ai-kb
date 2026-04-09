@@ -75,6 +75,14 @@ export async function apiFetchBinary(
   return response
 }
 
+/** 原始响应请求（与二进制 helper 语义一致，便于阅读器显式表达“不要 JSON 解析”） */
+export async function apiFetchRaw(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return apiFetchBinary(path, init)
+}
+
 export async function apiFetch(
   path: string,
   init: RequestInit = {},

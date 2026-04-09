@@ -3,7 +3,7 @@
     <div class="pdf-reader">
       <div class="topbar">
         <el-button @click="router.back()">返回</el-button>
-        <div class="title">{{ docInfo?.doc?.title || `PDF #${fileId}` }}</div>
+        <div class="title">{{ docInfo?.doc?.title || `PDF #${currentFileId}` }}</div>
         <el-switch v-model="dualPane" active-text="双栏" inactive-text="单栏" />
         <el-switch v-model="linkedScroll" active-text="联动滚动" inactive-text="解耦滚动" />
         <el-button :loading="translating" @click="triggerTranslate">全文翻译</el-button>
@@ -13,9 +13,16 @@
 
       <div class="body" :class="{ single: !dualPane }">
         <section ref="leftPaneRef" class="pane left" @scroll="onLeftScroll">
-          <div v-if="pdfLoadError" class="pdf-load-error">{{ pdfLoadError }}</div>
+          <div v-if="pdfState === 'loading'" class="pdf-status">PDF 正在加载…</div>
+          <div v-else-if="pdfState === 'failed'" class="pdf-load-error">{{ pdfErrorMessage }}</div>
           <template v-else>
-            <div v-for="p in pageCount" :key="p" :data-page="p" class="pdf-page-wrap">
+            <div
+              v-for="p in pageCount"
+              :key="`page-${currentFileId}-${p}`"
+              :data-page="p"
+              class="pdf-page-wrap"
+            >
+              <div class="pdf-page-meta">第 {{ p }} / {{ pageCount }} 页</div>
               <canvas :ref="(el) => bindCanvas(el, p)" class="pdf-canvas" />
             </div>
           </template>
@@ -23,11 +30,17 @@
 
         <section v-if="dualPane" ref="rightPaneRef" class="pane right" @scroll="onRightScroll">
           <div class="translate-status">
-            <el-tag v-if="translationStatus === 'not_started'">未翻译</el-tag>
-            <el-tag v-else-if="translationStatus === 'running'">翻译中 {{ translationProgress }}%</el-tag>
-            <el-tag v-else-if="translationStatus === 'completed'" type="success">已完成</el-tag>
-            <el-tag v-else type="danger">{{ translationStatus }}</el-tag>
+            <el-tag v-if="translationState === 'idle'">未翻译</el-tag>
+            <el-tag v-else-if="translationState === 'pending'">排队中</el-tag>
+            <el-tag v-else-if="translationState === 'running'">翻译中 {{ translationProgress }}%</el-tag>
+            <el-tag v-else-if="translationState === 'completed'" type="success">已完成</el-tag>
+            <el-tag v-else-if="translationState === 'empty'" type="info">暂无译文</el-tag>
+            <el-tag v-else type="danger">翻译失败</el-tag>
+            <span class="translate-debug">{{ translationDebugMessage }}</span>
           </div>
+
+          <div v-if="translationErrorMessage" class="translate-error">{{ translationErrorMessage }}</div>
+          <div v-else-if="translationItems.length === 0" class="translate-empty">暂无译文内容</div>
           <div
             v-for="item in translationItems"
             :key="item.chunk_id"
@@ -60,7 +73,12 @@
           <el-input v-model="qaQuestion" type="textarea" :rows="3" placeholder="在当前文献中提问" />
           <el-button size="small" :loading="qaLoading" @click="askQa">提问</el-button>
           <div v-if="qaAnswer" class="qa-answer">{{ qaAnswer }}</div>
-          <div v-for="ref in qaRefs" :key="`${ref.chunk_id}-${ref.page_number}`" class="qa-ref" @click="jumpToPage(ref.page_number)">
+          <div
+            v-for="ref in qaRefs"
+            :key="`${ref.chunk_id}-${ref.page_number}`"
+            class="qa-ref"
+            @click="jumpToPage(ref.page_number)"
+          >
             p.{{ ref.page_number || '-' }} {{ ref.snippet }}
           </div>
 
@@ -74,19 +92,20 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import * as pdfjsLib from 'pdfjs-dist'
-import workerSrcImport from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import * as pdfjsLib from 'pdfjs-dist/build/pdf.min.mjs'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import AdminLayout from '../layouts/AdminLayout.vue'
-import { apiFetchBinary, readApiErrorMessage } from '../api/client'
+import { readApiErrorMessage } from '../api/client'
 import {
   addAttachmentApi,
   askPdfQaApi,
   createAnnotationApi,
-  deleteAnnotationApi,
   downloadPdfBundleApi,
+  getPdfContentApi,
+  deleteAnnotationApi,
   getAnnotationsByUserApi,
   getMyAnnotationsApi,
   getPdfDocumentApi,
@@ -98,15 +117,14 @@ import {
   triggerPdfTranslateApi,
 } from '../api/pdfDocuments'
 
-// Vite：worker 资源 URL 需相对当前模块解析，否则在子路径部署或打包后可能 404 → PDF.js 报 Failed to fetch
-;(pdfjsLib as any).GlobalWorkerOptions.workerSrc = new URL(
-  workerSrcImport,
-  import.meta.url,
-).href
+(pdfjsLib as any).GlobalWorkerOptions.workerSrc = pdfWorkerUrl
+
+type PdfRenderState = 'idle' | 'loading' | 'loaded' | 'failed'
+type TranslationViewState = 'idle' | 'pending' | 'running' | 'completed' | 'failed' | 'empty'
 
 const route = useRoute()
 const router = useRouter()
-const fileId = Number(route.params.fileId)
+const currentFileId = computed(() => Number(route.params.fileId))
 
 const dualPane = ref(true)
 const linkedScroll = ref(true)
@@ -114,13 +132,16 @@ const leftPaneRef = ref<HTMLElement | null>(null)
 const rightPaneRef = ref<HTMLElement | null>(null)
 
 const docInfo = ref<any>(null)
-const pdfLoadError = ref<string | null>(null)
+const pdfState = ref<PdfRenderState>('idle')
+const pdfErrorMessage = ref('')
 const pageCount = ref(0)
 const translating = ref(false)
-const translationStatus = ref('not_started')
+
+const translationState = ref<TranslationViewState>('idle')
 const translationProgress = ref(0)
 const translationItems = ref<any[]>([])
-const canvasMap = new Map<number, HTMLCanvasElement>()
+const translationErrorMessage = ref('')
+const translationDebugMessage = ref('')
 
 const myAnnotations = ref<any[]>([])
 const publicUserIds = ref<number[]>([])
@@ -135,25 +156,213 @@ const qaRefs = ref<any[]>([])
 const selectionTranslation = ref('')
 
 let pdfDoc: any = null
+let pdfLoadingTask: any = null
+let pdfRequestSeq = 0
+let translationRequestSeq = 0
+let translationPollTimer: number | null = null
 
-function bindCanvas(el: any, pageNo: number) {
+const canvasMap = new Map<number, HTMLCanvasElement>()
+const renderTaskMap = new Map<number, any>()
+
+function bindCanvas(el: unknown, pageNo: number) {
   if (el instanceof HTMLCanvasElement) {
     canvasMap.set(pageNo, el)
-    void renderPage(pageNo)
+    if (pdfState.value === 'loaded') {
+      void renderPage(pageNo, pdfRequestSeq)
+    }
+  } else {
+    canvasMap.delete(pageNo)
   }
 }
 
-async function renderPage(pageNo: number) {
-  if (!pdfDoc) return
+function normalizeErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  return fallback
+}
+
+async function cleanupPdfResources() {
+  for (const [, renderTask] of renderTaskMap) {
+    try {
+      renderTask.cancel()
+    } catch {
+      // ignore
+    }
+  }
+  renderTaskMap.clear()
+
+  if (pdfLoadingTask) {
+    try {
+      pdfLoadingTask.destroy()
+    } catch {
+      // ignore
+    }
+    pdfLoadingTask = null
+  }
+
+  if (pdfDoc) {
+    try {
+      await pdfDoc.destroy()
+    } catch {
+      // ignore
+    }
+    pdfDoc = null
+  }
+  canvasMap.clear()
+}
+
+async function renderPage(pageNo: number, requestSeq: number) {
+  if (!pdfDoc || requestSeq !== pdfRequestSeq) return
   const canvas = canvasMap.get(pageNo)
   if (!canvas) return
+
   const page = await pdfDoc.getPage(pageNo)
-  const viewport = page.getViewport({ scale: 1.25 })
+  const viewport = page.getViewport({ scale: 1.3 })
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  canvas.width = viewport.width
-  canvas.height = viewport.height
-  await page.render({ canvasContext: ctx, viewport }).promise
+
+  canvas.width = Math.floor(viewport.width)
+  canvas.height = Math.floor(viewport.height)
+  console.info('[PDF] renderPage', { fileId: currentFileId.value, pageNo, width: canvas.width, height: canvas.height })
+
+  const renderTask = page.render({ canvasContext: ctx, viewport })
+  renderTaskMap.set(pageNo, renderTask)
+  try {
+    await renderTask.promise
+  } finally {
+    renderTaskMap.delete(pageNo)
+  }
+}
+
+async function renderAllPages(requestSeq: number) {
+  if (!pdfDoc || requestSeq !== pdfRequestSeq) return
+  console.info('[PDF] renderAllPages start', { fileId: currentFileId.value, pageCount: pageCount.value })
+  for (let pageNo = 1; pageNo <= pageCount.value; pageNo += 1) {
+    if (requestSeq !== pdfRequestSeq) return
+    await renderPage(pageNo, requestSeq)
+  }
+  console.info('[PDF] renderAllPages done', { fileId: currentFileId.value, pageCount: pageCount.value })
+}
+
+function parseTranslationItems(payload: any): any[] {
+  if (!payload || typeof payload !== 'object') return []
+  if (Array.isArray(payload.items)) return payload.items
+  if (payload.content && Array.isArray(payload.content.items)) return payload.content.items
+  if (Array.isArray(payload.content)) return payload.content
+  return []
+}
+
+async function loadPdfDocument(fileId: number) {
+  const requestSeq = ++pdfRequestSeq
+  pdfState.value = 'loading'
+  pdfErrorMessage.value = ''
+  pageCount.value = 0
+  await cleanupPdfResources()
+
+  try {
+    const response = await getPdfContentApi(fileId)
+    const contentType = response.headers.get('content-type') || 'unknown'
+    console.info('[PDF] fetch', { url: response.url, status: response.status, contentType })
+
+    if (!response.ok) {
+      throw new Error(await readApiErrorMessage(response, 'PDF 内容请求失败'))
+    }
+
+    const arrayBuffer = await response.arrayBuffer()
+    console.info('[PDF] arrayBuffer', { fileId, byteLength: arrayBuffer.byteLength })
+    if (arrayBuffer.byteLength <= 0) {
+      throw new Error('PDF 内容为空（0 字节）')
+    }
+
+    if (!contentType.toLowerCase().includes('application/pdf')) {
+      const head = new TextDecoder().decode(arrayBuffer.slice(0, 240))
+      throw new Error(`响应 Content-Type 非 PDF：${contentType}；内容片段：${head}`)
+    }
+
+    pdfLoadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) })
+    pdfDoc = await pdfLoadingTask.promise
+    if (requestSeq !== pdfRequestSeq) return
+
+    pageCount.value = Number(pdfDoc.numPages || 0)
+    console.info('[PDF] getDocument success', { fileId, pageCount: pageCount.value, workerSrc: pdfWorkerUrl })
+
+    if (pageCount.value <= 0) {
+      throw new Error('PDF 页数为 0，无法渲染')
+    }
+
+    pdfState.value = 'loaded'
+    await nextTick()
+    await renderAllPages(requestSeq)
+  } catch (error) {
+    console.error('[PDF] load failed', error)
+    if (requestSeq !== pdfRequestSeq) return
+    pdfState.value = 'failed'
+    pdfErrorMessage.value = `PDF 加载失败：${normalizeErrorMessage(error, '未知错误')}`
+  }
+}
+
+function toTranslationViewState(status: string | undefined): TranslationViewState {
+  const s = (status || '').toLowerCase()
+  if (s === 'pending') return 'pending'
+  if (s === 'running') return 'running'
+  if (s === 'completed') return 'completed'
+  if (s === 'failed') return 'failed'
+  if (s === 'not_started') return 'idle'
+  return 'idle'
+}
+
+function clearTranslationPoll() {
+  if (translationPollTimer != null) {
+    window.clearTimeout(translationPollTimer)
+    translationPollTimer = null
+  }
+}
+
+async function refreshTranslation(fileId: number) {
+  const requestSeq = ++translationRequestSeq
+  translationErrorMessage.value = ''
+
+  try {
+    const statusRes = await getPdfTranslationStatusApi(fileId)
+    if (requestSeq !== translationRequestSeq) return
+
+    translationState.value = toTranslationViewState(statusRes.status)
+    translationProgress.value = Number(statusRes.progress || 0)
+    translationDebugMessage.value = `status=${statusRes.status || 'unknown'}, progress=${translationProgress.value}%`
+    console.info('[Translation] status', { fileId, status: statusRes.status, progress: statusRes.progress })
+
+    const shouldFetchContent = translationState.value === 'completed' || translationState.value === 'running' || translationState.value === 'pending'
+
+    if (shouldFetchContent) {
+      const contentRes = await getPdfTranslationContentApi(fileId)
+      if (requestSeq !== translationRequestSeq) return
+      const items = parseTranslationItems(contentRes)
+      translationItems.value = items
+      console.info('[Translation] content', { fileId, itemCount: items.length })
+
+      if (items.length > 0 && translationState.value !== 'failed') {
+        if (translationState.value !== 'running' && translationState.value !== 'pending') {
+          translationState.value = 'completed'
+        }
+      } else if (translationState.value === 'completed') {
+        translationState.value = 'empty'
+      }
+    } else {
+      translationItems.value = []
+    }
+
+    clearTranslationPoll()
+    if (translationState.value === 'pending' || translationState.value === 'running') {
+      translationPollTimer = window.setTimeout(() => {
+        void refreshTranslation(fileId)
+      }, 2500)
+    }
+  } catch (error) {
+    if (requestSeq !== translationRequestSeq) return
+    translationState.value = 'failed'
+    translationErrorMessage.value = `译文加载失败：${normalizeErrorMessage(error, '未知错误')}`
+    console.error('[Translation] refresh failed', error)
+  }
 }
 
 function onLeftScroll() {
@@ -174,66 +383,48 @@ function jumpToPage(pageNumber?: number | null) {
   if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-async function refreshTranslation() {
-  try {
-    const status = await getPdfTranslationStatusApi(fileId)
-    translationStatus.value = status.status || 'not_started'
-    translationProgress.value = status.progress || 0
-    if (status.status === 'completed') {
-      const content = await getPdfTranslationContentApi(fileId)
-      translationItems.value = content.content?.items || []
-    } else {
-      translationItems.value = []
-    }
-  } catch (e) {
-    translationStatus.value = 'not_started'
-    translationItems.value = []
-    const msg = e instanceof Error ? e.message : '获取翻译状态失败'
-    ElMessage.warning(msg)
-  }
-}
-
 async function triggerTranslate() {
   try {
     translating.value = true
-    await triggerPdfTranslateApi(fileId)
-    await refreshTranslation()
+    await triggerPdfTranslateApi(currentFileId.value)
+    await refreshTranslation(currentFileId.value)
     ElMessage.success('已触发翻译任务')
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : '翻译失败')
+    ElMessage.error(normalizeErrorMessage(e, '翻译失败'))
   } finally {
     translating.value = false
   }
 }
 
 function downloadOriginal() {
-  void downloadPdfBundleApi(fileId, false)
+  void downloadPdfBundleApi(currentFileId.value, false)
 }
+
 function downloadBundle() {
-  void downloadPdfBundleApi(fileId, true)
+  void downloadPdfBundleApi(currentFileId.value, true)
 }
 
 async function addNote() {
   const text = window.getSelection()?.toString().trim() || `note-${Date.now()}`
-  await createAnnotationApi(fileId, { annotation_json: { text }, is_public: false })
-  myAnnotations.value = await getMyAnnotationsApi(fileId)
+  await createAnnotationApi(currentFileId.value, { annotation_json: { text }, is_public: false })
+  myAnnotations.value = await getMyAnnotationsApi(currentFileId.value)
 }
 
 async function removeNote(id: number) {
-  await deleteAnnotationApi(fileId, id)
-  myAnnotations.value = await getMyAnnotationsApi(fileId)
+  await deleteAnnotationApi(currentFileId.value, id)
+  myAnnotations.value = await getMyAnnotationsApi(currentFileId.value)
 }
 
 async function loadPublicAnnotations() {
   if (!selectedPublicUser.value) return
-  publicAnnotations.value = await getAnnotationsByUserApi(fileId, selectedPublicUser.value)
+  publicAnnotations.value = await getAnnotationsByUserApi(currentFileId.value, selectedPublicUser.value)
 }
 
 async function askQa() {
   if (!qaQuestion.value.trim()) return
   qaLoading.value = true
   try {
-    const res = await askPdfQaApi(fileId, qaQuestion.value)
+    const res = await askPdfQaApi(currentFileId.value, qaQuestion.value)
     qaAnswer.value = res.answer
     qaRefs.value = res.references || []
   } finally {
@@ -244,42 +435,21 @@ async function askQa() {
 async function translateSelection() {
   const text = window.getSelection()?.toString().trim()
   if (!text) return
-  const res = await selectionTranslateApi(fileId, text)
+  const res = await selectionTranslateApi(currentFileId.value, text)
   selectionTranslation.value = res.translated
 }
 
-onMounted(async () => {
+async function loadReaderMeta(fileId: number) {
+  translationItems.value = []
+  translationErrorMessage.value = ''
+  translationState.value = 'idle'
+  translationProgress.value = 0
+
   try {
     docInfo.value = await getPdfDocumentApi(fileId)
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : '获取文献详情失败')
+    ElMessage.error(normalizeErrorMessage(e, '获取文献详情失败'))
     return
-  }
-
-  // 二进制下载：专用 apiFetchBinary，避免与 JSON 封装混用；URL 使用 buildApiUrl 保证绝对地址
-  try {
-    pdfLoadError.value = null
-    const res = await apiFetchBinary(`/files/${fileId}/download`)
-    if (!res.ok) {
-      throw new Error(await readApiErrorMessage(res, '下载 PDF 失败'))
-    }
-    const buf = await res.arrayBuffer()
-    if (buf.byteLength === 0) {
-      throw new Error('下载的 PDF 为空（0 字节）')
-    }
-    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buf) })
-    pdfDoc = await loadingTask.promise
-    pageCount.value = pdfDoc.numPages || 0
-    if (!pageCount.value) {
-      const msg = '该 PDF 页数为 0，无法渲染'
-      pdfLoadError.value = msg
-      ElMessage.warning(msg)
-    }
-  } catch (e) {
-    const msg =
-      e instanceof Error ? e.message : typeof e === 'string' ? e : '加载 PDF 失败'
-    pdfLoadError.value = `PDF 加载失败：${msg}`
-    ElMessage.error(pdfLoadError.value)
   }
 
   try {
@@ -287,10 +457,8 @@ onMounted(async () => {
     publicUserIds.value = (await listPublicAnnotationUsersApi(fileId)).user_ids || []
     attachments.value = await listAttachmentsApi(fileId)
   } catch {
-    /* 侧栏失败不阻塞阅读 */
+    // 侧栏失败不阻塞阅读
   }
-
-  await refreshTranslation()
 
   if (attachments.value.length === 0) {
     try {
@@ -300,6 +468,24 @@ onMounted(async () => {
       // ignore
     }
   }
+
+  await Promise.all([loadPdfDocument(fileId), refreshTranslation(fileId)])
+}
+
+watch(currentFileId, (nextId) => {
+  if (Number.isFinite(nextId) && nextId > 0) {
+    clearTranslationPoll()
+    void loadReaderMeta(nextId)
+  }
+}, { immediate: true })
+
+onMounted(() => {
+  console.info('[PDF] worker configured', { workerSrc: pdfWorkerUrl })
+})
+
+onBeforeUnmount(async () => {
+  clearTranslationPoll()
+  await cleanupPdfResources()
 })
 </script>
 
@@ -311,9 +497,15 @@ onMounted(async () => {
 .body.single { grid-template-columns: 1fr 320px; }
 .pane { border:1px solid #ddd; border-radius:8px; overflow:auto; padding:8px; background:#fff; }
 .sidebar { border:1px solid #ddd; border-radius:8px; overflow:auto; padding:8px; }
+.pdf-status { padding: 16px; color: #666; }
 .pdf-load-error { padding: 16px; color: #c00; font-size: 14px; line-height: 1.5; }
-.pdf-page-wrap { margin-bottom: 12px; }
-.pdf-canvas { width: 100%; background: #fafafa; }
+.pdf-page-wrap { margin-bottom: 12px; background: #f5f5f5; border-radius: 8px; padding: 8px; }
+.pdf-page-meta { font-size: 12px; color: #666; margin-bottom: 6px; }
+.pdf-canvas { width: 100%; background: #fafafa; border-radius: 4px; }
+.translate-status { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.translate-debug { font-size: 12px; color: #777; }
+.translate-error { padding: 12px; color: #c00; font-size: 13px; }
+.translate-empty { padding: 12px; color: #666; font-size: 13px; }
 .tr-item { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }
 .meta { font-size:12px; color:#666; }
 .note { font-size:12px; margin:6px 0; padding:6px; background:#f7f7f7; border-radius:6px; }

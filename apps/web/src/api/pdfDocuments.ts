@@ -1,9 +1,7 @@
-import { apiFetch } from './client'
+import { apiFetch, apiFetchRaw, readJsonOk } from './client'
 
 async function parseJson<T>(res: Response, fallback: string): Promise<T> {
-  const text = await res.text()
-  if (!res.ok) throw new Error(text || fallback)
-  return text ? (JSON.parse(text) as T) : ({} as T)
+  return readJsonOk<T>(res, fallback)
 }
 
 export function getPdfDocumentApi(fileId: number) {
@@ -28,6 +26,10 @@ export function getPdfTranslationContentApi(fileId: number, target_language = 'z
   return apiFetch(`/pdf-documents/${fileId}/translation-content?target_language=${encodeURIComponent(target_language)}`).then((r) =>
     parseJson<any>(r, '获取译文失败'),
   )
+}
+
+export function getPdfContentApi(fileId: number) {
+  return apiFetchRaw(`/pdf-documents/${fileId}/content`)
 }
 
 export async function downloadPdfBundleApi(fileId: number, includeTranslation = false) {
