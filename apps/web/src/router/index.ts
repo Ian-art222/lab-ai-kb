@@ -6,6 +6,7 @@ import ChatView from '../views/ChatView.vue'
 import UsersView from '../views/UsersView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import AdminDiagnosticsView from '../views/AdminDiagnosticsView.vue'
+import PdfReaderView from '../views/PdfReaderView.vue'
 import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
@@ -30,6 +31,12 @@ const router = createRouter({
       path: '/chat',
       name: 'chat',
       component: ChatView,
+    },
+
+    {
+      path: '/reader/:fileId',
+      name: 'pdf-reader',
+      component: PdfReaderView,
     },
     {
       path: '/users',

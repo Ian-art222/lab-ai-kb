@@ -239,6 +239,9 @@
         </template>
         <template v-else-if="ctxMenu.row?.kind === 'file'">
           <button type="button" @click="ctxOpenFile">打开 / 详情</button>
+          <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxOpenReader">打开阅读器</button>
+          <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxTranslatePdf">全文翻译</button>
+          <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxExportBib">导出 .bib</button>
           <button
             type="button"
             :disabled="!fileCtxCanDownload"
@@ -378,6 +381,15 @@
               <el-button type="info" :disabled="!fileMeta" @click="goToChatForFile(fileMeta!.id)">
                 问这个文件
               </el-button>
+              <el-button v-if="fileMeta?.file_type === 'pdf'" type="primary" plain @click="openPdfReader(fileMeta!.id)">
+                打开阅读器
+              </el-button>
+              <el-button v-if="fileMeta?.file_type === 'pdf'" plain @click="translatePdf(fileMeta!.id)">
+                全文翻译
+              </el-button>
+              <el-button v-if="fileMeta?.file_type === 'pdf'" plain @click="exportPdfBib(fileMeta!.id)">
+                导出 .bib
+              </el-button>
               <el-button
                 type="primary"
                 :disabled="!fileMeta || !metaCanDownload"
@@ -428,6 +440,7 @@ import {
 } from '../api/files'
 import { getFileIndexStatusApi, ingestFileApi } from '../api/qa'
 import { useAuthStore } from '../stores/auth'
+import { exportBibApi, triggerPdfTranslateApi } from '../api/pdfDocuments'
 import { formatAdminPrivateFolderDisplayName } from '../utils/folderDisplay'
 
 type DriveRow =
@@ -974,6 +987,23 @@ function ctxChatFile() {
   closeCtxMenu()
   if (row?.kind === 'file') goToChatForFile(row.id)
 }
+function ctxOpenReader() {
+  const row = ctxMenu.value.row
+  closeCtxMenu()
+  if (row?.kind === 'file') openPdfReader(row.id)
+}
+
+function ctxTranslatePdf() {
+  const row = ctxMenu.value.row
+  closeCtxMenu()
+  if (row?.kind === 'file') void translatePdf(row.id)
+}
+
+function ctxExportBib() {
+  const row = ctxMenu.value.row
+  closeCtxMenu()
+  if (row?.kind === 'file') void exportPdfBib(row.id)
+}
 
 const moveDialogTitle = computed(() => {
   if (moveDialogTargetKind.value === 'folder') return '移动目录'
@@ -1453,6 +1483,35 @@ const goToChatForFile = (fileId: number) => {
       file_ids: String(fileId),
     },
   })
+}
+const openPdfReader = (fileId: number) => {
+  router.push({ name: 'pdf-reader', params: { fileId: String(fileId) } })
+}
+
+const translatePdf = async (fileId: number) => {
+  try {
+    await triggerPdfTranslateApi(fileId)
+    ElMessage.success('已触发 PDF 全文翻译')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '触发翻译失败')
+  }
+}
+
+const exportPdfBib = async (fileId: number) => {
+  try {
+    const bib = await exportBibApi(fileId)
+    const blob = new Blob([bib], { type: 'application/x-bibtex' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `file-${fileId}.bib`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导出失败')
+  }
 }
 
 async function goParent() {

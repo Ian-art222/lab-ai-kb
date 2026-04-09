@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.auth import router as auth_router
 from app.api.admin_diagnostics import router as admin_diagnostics_router
+from app.api.pdf_documents import router as pdf_documents_router
 
 
 def _parse_cors_origins() -> list[str]:
@@ -33,6 +34,7 @@ app.include_router(qa_router)
 app.include_router(users_router)
 app.include_router(settings_router)
 app.include_router(admin_diagnostics_router)
+app.include_router(pdf_documents_router)
 
 
 @app.get("/")
