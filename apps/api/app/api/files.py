@@ -58,6 +58,8 @@ from app.schemas.folder import (
     FolderViewUi,
 )
 from app.services.folder_spaces import ensure_space_roots, get_home_root, is_descendant_or_self
+from app.services.pdf_document_service import ensure_pdf_document
+from app.services.pdf_ingest_bridge_service import mark_pdf_indexing_pending, schedule_ingest
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -783,6 +785,7 @@ def delete_folder(
 
 @router.post("/upload")
 async def upload_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     folder_id: int | None = Form(None),
     db: Session = Depends(get_db),
@@ -829,10 +832,29 @@ async def upload_file(
     db.commit()
     db.refresh(new_file)
 
+    auto_ingest_queued = False
+    if (new_file.file_type or "").lower() == "pdf":
+        pdf_doc = ensure_pdf_document(db, file_record=new_file, created_by=current_user.id)
+        mark_pdf_indexing_pending(db, file_record=new_file)
+        result = schedule_ingest(
+            db,
+            file_record=new_file,
+            background_tasks=background_tasks,
+            reset_status=True,
+        )
+        auto_ingest_queued = bool(result.get("queued"))
+        if auto_ingest_queued:
+            pdf_doc.index_status = "indexing"
+            pdf_doc.parse_status = "parsing"
+            pdf_doc.parse_progress = 1
+            pdf_doc.index_progress = 1
+            db.commit()
+
     return {
         "message": "上传成功",
         "id": new_file.id,
         "file_name": new_file.file_name,
+        "auto_ingest_queued": auto_ingest_queued,
     }
 
 

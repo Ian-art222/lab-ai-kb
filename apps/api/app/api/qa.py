@@ -1,15 +1,13 @@
-from threading import Lock
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.permissions import can_view_folder, user_may_access_file_record
-from app.db.session import SessionLocal, get_db
+from app.db.session import get_db
 from app.models.file_record import FileRecord
 from app.models.folder import Folder
 from app.models.user import User
-from app.services.ingest_service import ingest_file_job as run_file_ingest
+from app.services.pdf_ingest_bridge_service import schedule_ingest
 from app.services.qa_service import (
     QAServiceError,
     append_qa_failure,
@@ -27,11 +25,6 @@ from app.schemas.qa import AskRequest, AskSuccessResponse, IngestFileRequest
 
 router = APIRouter(prefix="/api/qa", tags=["qa"])
 
-_active_ingest_file_ids: set[int] = set()
-_active_ingest_lock = Lock()
-_ACTIVE_INDEX_STATUSES = {"indexing", "parsing", "chunking", "embedding", "reindexing"}
-
-
 def _ensure_ask_scope(db: Session, user: User, payload: AskRequest) -> None:
     if payload.scope_type == "folder" and payload.folder_id is not None:
         folder = db.query(Folder).filter(Folder.id == payload.folder_id).first()
@@ -42,19 +35,6 @@ def _ensure_ask_scope(db: Session, user: User, payload: AskRequest) -> None:
             fr = db.query(FileRecord).filter(FileRecord.id == fid).first()
             if not fr or not user_may_access_file_record(db, user, fr):
                 raise HTTPException(status_code=403, detail="所选文件不可用")
-
-
-def _run_ingest_in_background(file_id: int) -> None:
-    db = SessionLocal()
-    try:
-        file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
-        if not file_record:
-            return
-        run_file_ingest(db, file_record, prepare_indexing=False)
-    finally:
-        with _active_ingest_lock:
-            _active_ingest_file_ids.discard(file_id)
-        db.close()
 
 
 @router.post("/ask", response_model=AskSuccessResponse)
@@ -190,36 +170,21 @@ def ingest_file(
     if not user_may_access_file_record(db, current_user, file_record):
         raise HTTPException(status_code=403, detail="无权对该文件执行索引")
 
-    with _active_ingest_lock:
-        already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status in _ACTIVE_INDEX_STATUSES
-        if not already_running:
-            _active_ingest_file_ids.add(payload.file_id)
+    result = schedule_ingest(
+        db,
+        file_record=file_record,
+        background_tasks=background_tasks,
+        reset_status=True,
+    )
 
-    if already_running:
-        return {
-            "file_id": file_record.id,
-            "index_status": file_record.index_status,
-            "indexed_at": file_record.indexed_at,
-            "index_error": file_record.index_error,
-            "index_warning": file_record.index_warning,
-            "queued": False,
-        }
-
-    file_record.index_status = "pending"
-    file_record.index_error = None
-    file_record.index_warning = None
-    file_record.indexed_at = None
-    db.commit()
     db.refresh(file_record)
-    background_tasks.add_task(_run_ingest_in_background, file_record.id)
-
     return {
         "file_id": file_record.id,
         "index_status": file_record.index_status,
         "indexed_at": file_record.indexed_at,
         "index_error": file_record.index_error,
         "index_warning": file_record.index_warning,
-        "queued": True,
+        "queued": bool(result.get("queued")),
     }
 
 
