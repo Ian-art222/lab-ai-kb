@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.core.permissions import user_may_access_file_record
 from app.db.session import get_db
 from app.models.file_record import FileRecord
@@ -34,6 +36,8 @@ from app.services.pdf_export_service import (
 )
 from app.services.pdf_reader_qa_service import ask_in_pdf
 from app.services.pdf_translation_service import get_latest_task, request_translation
+
+UPLOAD_DIR = Path(settings.upload_dir)
 
 router = APIRouter(prefix="/api/pdf-documents", tags=["pdf-documents"])
 
@@ -75,6 +79,11 @@ def _ensure_pdf_file(db: Session, current_user: User, file_id: int) -> tuple[Fil
         raise HTTPException(status_code=400, detail="仅支持 PDF 文献")
     doc = get_by_file_id(db, file_id) or ensure_pdf_document(db, file_record=file_record, created_by=current_user.id)
     return file_record, doc
+
+
+def _get_file_storage_path(file_record: FileRecord) -> Path:
+    storage_path = file_record.storage_path or file_record.file_name
+    return UPLOAD_DIR / storage_path
 
 
 @router.get("/{file_id}")
@@ -180,6 +189,24 @@ def document_download(
         translation_task=task,
         include_original=include_original,
         include_translation=include_translation,
+    )
+
+
+@router.get("/{file_id}/content")
+def document_content(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    file_record, _ = _ensure_pdf_file(db, current_user, file_id)
+    file_path = _get_file_storage_path(file_record)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="服务器上未找到该文件")
+    return FileResponse(
+        path=file_path,
+        filename=file_record.file_name,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{file_record.file_name}"'},
     )
 
 
