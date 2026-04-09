@@ -28,8 +28,8 @@ export function getPdfTranslationContentApi(fileId: number, target_language = 'z
   )
 }
 
-export function getPdfContentApi(fileId: number) {
-  return apiFetchRaw(`/pdf-documents/${fileId}/content`)
+export function getPdfContentApi(fileId: number, init: RequestInit = {}) {
+  return apiFetchRaw(`/pdf-documents/${fileId}/content`, init)
 }
 
 export async function downloadPdfBundleApi(fileId: number, includeTranslation = false) {

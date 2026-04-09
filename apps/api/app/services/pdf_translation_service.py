@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.models.knowledge import KnowledgeChunk
 from app.models.pdf_literature import PdfDocument, PdfTranslationTask
 from app.models.system_setting import SystemSetting
+from app.core.config import settings as app_settings
 from app.services.model_service import chat_completion
 
 
@@ -80,8 +81,10 @@ def _run_translation_task(task_id: int) -> None:
             db.commit()
             return
 
-        settings = db.query(SystemSetting).filter(SystemSetting.id == 1).first()
-        if not settings or not (settings.llm_api_base and settings.llm_api_key and settings.llm_model):
+        sys_settings = db.query(SystemSetting).filter(SystemSetting.id == 1).first()
+        if not sys_settings or not (
+            sys_settings.llm_api_base and sys_settings.llm_api_key and sys_settings.llm_model
+        ):
             task.status = "failed"
             task.error_message = "LLM 配置不完整"
             db.commit()
@@ -104,17 +107,18 @@ def _run_translation_task(task_id: int) -> None:
 
         task.status = "running"
         task.progress = 1
-        task.provider_name = settings.llm_provider
+        task.provider_name = sys_settings.llm_provider
         db.commit()
 
         total = len(chunks)
         items: list[dict] = []
         for idx, ch in enumerate(chunks, start=1):
             translated = chat_completion(
-                provider=settings.llm_provider,
-                api_base=settings.llm_api_base,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
+                provider=sys_settings.llm_provider,
+                api_base=sys_settings.llm_api_base,
+                api_key=sys_settings.llm_api_key,
+                model=sys_settings.llm_model,
+                timeout=app_settings.pdf_translation_llm_timeout,
                 messages=[
                     {
                         "role": "system",
@@ -153,6 +157,9 @@ def _run_translation_task(task_id: int) -> None:
         if task:
             task.status = "failed"
             task.error_message = str(exc)
+            # 进入循环前会把 progress 置为 1；若首轮 LLM 即失败，易误判为「刚开始翻译」
+            if (task.progress or 0) <= 1:
+                task.progress = 0
             db.commit()
     finally:
         db.close()

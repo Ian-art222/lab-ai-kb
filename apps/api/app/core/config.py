@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_api_version: str = ""
     llm_timeout: float = 60.0
+    # 全文翻译逐 chunk 调模型，单 chunk 响应可能超过普通对话超时
+    pdf_translation_llm_timeout: float = 300.0
     llm_extra_headers_json: str = ""
     llm_organization: str = ""
     llm_project: str = ""

@@ -71,6 +71,11 @@ def _normalize_provider_error(exc: ProviderRequestError) -> str:
         return f"{exc.provider} 请求的模型或接口路径不存在，请检查 provider、base URL 与 model 配置。原始错误：{exc.detail}"
     if exc.code == "BAD_REQUEST":
         return f"{exc.provider} 请求参数不合法，请检查当前 provider 与模型参数配置。原始错误：{exc.detail}"
+    if exc.code == "READ_TIMEOUT":
+        return (
+            f"{exc.provider} 读取模型响应超时（上游在配置的超时时间内未传完数据）。"
+            f"可增大环境变量中的 llm_timeout 或 pdf_translation_llm_timeout（全文翻译）。原始：{exc.detail}"
+        )
     if exc.code == "NETWORK_ERROR":
         return f"{exc.provider} 网络连接失败，请检查服务地址、代理或外网访问状态。原始错误：{exc.detail}"
     if exc.code == "PROVIDER_ERROR":

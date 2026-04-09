@@ -6,4 +6,5 @@ declare module '*.vue' {
     export default component
   }
 declare module 'pdfjs-dist'
+declare module 'pdfjs-dist/build/pdf.min.mjs'
 declare module 'pdfjs-dist/build/pdf.worker.min.mjs?url'

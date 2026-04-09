@@ -179,6 +179,14 @@ def _post_json(
     try:
         with request.urlopen(req, timeout=config.timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except TimeoutError as exc:
+        raise ProviderRequestError(
+            f"{provider} 读取响应超时（{config.timeout}s）",
+            provider=normalize_provider_name(provider),
+            code="READ_TIMEOUT",
+            retryable=True,
+            detail=str(exc),
+        ) from exc
     except HTTPError as exc:
         raw_detail = exc.read().decode("utf-8", errors="ignore")
         detail = _summarize_error(raw_detail or str(exc.reason or "HTTP error"))
@@ -194,6 +202,16 @@ def _post_json(
             raw_response=raw_detail,
         ) from exc
     except URLError as exc:
+        reason = exc.reason
+        reason_s = str(reason or "").lower()
+        if isinstance(reason, TimeoutError) or "timed out" in reason_s or "timeout" in reason_s:
+            raise ProviderRequestError(
+                f"{provider} 读取/连接超时（{config.timeout}s）",
+                provider=normalize_provider_name(provider),
+                code="READ_TIMEOUT",
+                retryable=True,
+                detail=str(reason or exc),
+            ) from exc
         detail = _summarize_error(str(exc.reason or "network error"))
         raise ProviderRequestError(
             f"{provider} 连接失败: {detail}",
