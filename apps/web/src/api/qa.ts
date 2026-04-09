@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, parseHttpErrorPayload } from './client'
 
 export type ScopeType = 'all' | 'folder' | 'files'
 
@@ -11,6 +11,26 @@ export interface AskReference {
   score: number
   section_title?: string | null
   page_number?: number | null
+  heading_path?: string | null
+  block_type?: string | null
+  chunk_role?: string | null
+  /** 引用对应的检索命中 child（非扩展段落） */
+  ref_origin?: string | null
+  /** 实际写入上下文的角色：parent_primary / parent_with_adjacent_expansion / child_primary */
+  context_chunk_role?: string | null
+  provenance_type?: string | null
+  provenance_tags?: string[] | null
+  source_reason?: string | null
+  matched_query_index?: number | null
+  matched_query?: string | null
+  query_type?: string | null
+  rerank_score?: number | null
+  source_file_rank?: number | null
+  file_char_share?: number | null
+  parent_chunk_id?: number | null
+  parent_sequence_index?: number | null
+  adjacent_expansion?: boolean | null
+  adjacent_parent_chunk_ids?: number[] | null
 }
 
 export type AnswerSource =
@@ -18,6 +38,36 @@ export type AnswerSource =
   | 'knowledge_base_low_confidence'
   | 'model_general'
   | 'error'
+
+/** 与后端 retrieval_meta.answer_synthesis 对齐（仅列常用键，其余可走 Record） */
+export interface AnswerSynthesisTrace {
+  query_type?: string | null
+  coverage_assessment?: string | null
+  coverage_shortfall?: boolean | null
+  requires_multi_source_but_missing?: boolean | null
+  dominant_source_warning?: boolean | null
+  citation_source_count?: number | null
+  coverage_shortfall_prompt_applied?: boolean | null
+  [key: string]: unknown
+}
+
+/** 与后端 retrieval_meta.coverage_diagnostics 对齐（宽松） */
+export interface CoverageDiagnostics {
+  query_type?: string | null
+  distinct_files_pre_pack?: number | null
+  distinct_files_post_pack?: number | null
+  dominant_file_ratio_post_pack?: number | null
+  dominant_file_ratio_chunks?: number | null
+  selected_file_distribution?: Record<string, number> | null
+  unmatched_queries?: string[] | null
+  weak_query_indices?: string[] | null
+  coverage_by_query?: Record<string, unknown> | null
+  coverage_shortfall?: Record<string, unknown> | null
+  dominant_source_warning?: boolean | null
+  citation_source_count?: number | null
+  packing_decision_trace?: Record<string, unknown> | null
+  [key: string]: unknown
+}
 
 export interface RetrievalMeta {
   retrieval_strategy: string
@@ -61,7 +111,11 @@ export interface RetrievalMeta {
   multi_source_coverage?: number | null
   clarification_needed?: boolean | null
   compare_result?: Record<string, unknown> | null
-  selected_scope?: string | null
+  /** 开启 qa_debug_retrieval_trace_enabled 时由后端填充 */
+  retrieval_trace?: Record<string, unknown> | null
+  query_understanding?: Record<string, unknown> | null
+  answer_synthesis?: AnswerSynthesisTrace | Record<string, unknown> | null
+  coverage_diagnostics?: CoverageDiagnostics | null
 }
 
 export interface AskResponse {
@@ -139,39 +193,30 @@ export class QaApiError extends Error {
   }
 }
 
-async function readErrorPayload(
-  response: Response,
-  fallback: string,
-): Promise<{ message: string; code?: string }> {
-  const errorData = await response.json().catch(() => ({}))
-  if (typeof errorData.detail === 'string') {
-    return { message: errorData.detail }
+async function parseQaJson<T>(response: Response, errorFallback: string): Promise<T> {
+  const text = await response.text()
+  if (!response.ok) {
+    const p = parseHttpErrorPayload(text, response.status, errorFallback)
+    throw new QaApiError(p.message, p.code)
   }
-  if (errorData.detail && typeof errorData.detail === 'object') {
-    return {
-      message: errorData.detail.message || fallback,
-      code: errorData.detail.code,
-    }
+  if (!text.trim()) {
+    throw new QaApiError(`${errorFallback}：空响应`)
   }
-  return { message: fallback }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new QaApiError(`${errorFallback}：响应不是合法 JSON`)
+  }
 }
 
 export async function createSessionApi(): Promise<CreateSessionResponse> {
-  const response = await apiFetch('/api/qa/sessions', { method: 'POST' })
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '创建会话失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  const response = await apiFetch('/qa/sessions', { method: 'POST' })
+  return parseQaJson<CreateSessionResponse>(response, '创建会话失败')
 }
 
 export async function getSessionsApi(): Promise<QASessionListResponse> {
-  const response = await apiFetch('/api/qa/sessions')
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '获取会话列表失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  const response = await apiFetch('/qa/sessions')
+  return parseQaJson<QASessionListResponse>(response, '获取会话列表失败')
 }
 
 export async function askApi(params: {
@@ -205,55 +250,35 @@ export async function askApi(params: {
     rerank_top_n: params.rerank_top_n ?? null,
   }
 
-  const response = await apiFetch('/api/qa/ask', {
+  const response = await apiFetch('/qa/ask', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
 
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '提问失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  return parseQaJson<AskResponse>(response, '提问失败')
 }
 
 export async function ingestFileApi(data: IngestFileRequest): Promise<IndexStatusResponse> {
-  const response = await apiFetch('/api/qa/ingest/file', {
+  const response = await apiFetch('/qa/ingest/file', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   })
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '索引失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  return parseQaJson<IndexStatusResponse>(response, '索引失败')
 }
 
 export async function getFileIndexStatusApi(fileId: number): Promise<IndexStatusResponse> {
-  const response = await apiFetch(`/api/qa/files/${fileId}/index-status`)
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '获取索引状态失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  const response = await apiFetch(`/qa/files/${fileId}/index-status`)
+  return parseQaJson<IndexStatusResponse>(response, '获取索引状态失败')
 }
 
 export async function getSessionMessagesApi(sessionId: number): Promise<QASessionMessagesResponse> {
-  const response = await apiFetch(`/api/qa/sessions/${sessionId}/messages`)
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '获取会话消息失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  const response = await apiFetch(`/qa/sessions/${sessionId}/messages`)
+  return parseQaJson<QASessionMessagesResponse>(response, '获取会话消息失败')
 }
 
 export async function deleteSessionApi(sessionId: number): Promise<{ message: string }> {
-  const response = await apiFetch(`/api/qa/sessions/${sessionId}`, { method: 'DELETE' })
-  if (!response.ok) {
-    const error = await readErrorPayload(response, '删除会话失败')
-    throw new QaApiError(error.message, error.code)
-  }
-  return response.json()
+  const response = await apiFetch(`/qa/sessions/${sessionId}`, { method: 'DELETE' })
+  return parseQaJson<{ message: string }>(response, '删除会话失败')
 }

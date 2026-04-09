@@ -13,10 +13,10 @@
         </template>
 
         <el-result
-          v-if="!authStore.isAdmin"
+          v-if="!authStore.isRoot"
           icon="warning"
           title="无权限访问"
-          sub-title="只有管理员可以修改系统设置。"
+          sub-title="仅系统 root 可修改系统设置。"
         />
 
         <template v-else>
@@ -41,7 +41,7 @@
                 <el-form label-position="top">
                   <el-form-item label="主题模式">
                     <el-select v-model="form.theme_mode" style="width: 100%">
-                      <el-option label="暖色产品风" value="warm" />
+                      <el-option label="浅色（企业默认）" value="warm" />
                     </el-select>
                   </el-form-item>
                   <el-form-item label="侧边栏自动收起">
@@ -453,7 +453,7 @@ watch(
 )
 
 const loadSettings = async () => {
-  if (!authStore.isAdmin) return
+  if (!authStore.isRoot) return
   try {
     settings.value = await getSettingsApi()
     status.value = await getSettingsStatusApi()
@@ -560,19 +560,81 @@ loadSettings()
 </script>
 
 <style scoped>
-.settings-page { display: flex; flex-direction: column; gap: 16px; }
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
 .settings-card,
 .inner-card,
-.status-card { border-radius: var(--card-radius); }
-.page-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
-.page-title { font-size: 22px; font-weight: 700; color: var(--text-primary); }
-.page-subtitle { color: var(--text-secondary); margin-top: 6px; }
-.card-header-inline { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.masked-tip { color: var(--text-secondary); font-size: 12px; margin-top: 8px; }
-.test-result-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--text-secondary); font-size: 12px; }
-.status-grid { display: flex; gap: 12px; flex-wrap: wrap; }
-.test-history-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-.test-history-card { border: 1px solid #f4ddcc; border-radius: 14px; padding: 12px; background: #fffaf6; }
-.test-history-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
-.test-detail { margin-top: 8px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.status-card {
+  border-radius: var(--ds-radius-lg, 16px);
+}
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ds-text, #1f1f1f);
+}
+.page-subtitle {
+  color: var(--ds-text-secondary, #444746);
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 560px;
+}
+.card-header-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.masked-tip {
+  color: var(--ds-text-secondary, #444746);
+  font-size: 12px;
+  margin-top: 8px;
+}
+.test-result-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--ds-text-secondary, #444746);
+  font-size: 12px;
+}
+.status-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.test-history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+.test-history-card {
+  border: 1px solid var(--ds-line-subtle, #e0e3e7);
+  border-radius: var(--ds-radius-md, 12px);
+  padding: 14px 16px;
+  background: var(--ds-surface-muted, #f0f4f9);
+}
+.test-history-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ds-text, #1f1f1f);
+  margin-bottom: 8px;
+}
+.test-detail {
+  margin-top: 8px;
+  color: var(--ds-text-secondary, #444746);
+  font-size: 12px;
+  line-height: 1.6;
+}
 </style>

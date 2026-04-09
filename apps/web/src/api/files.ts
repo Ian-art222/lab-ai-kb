@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, getApiBase } from './client'
 
 export interface FileItem {
   id: number
@@ -14,6 +14,11 @@ export interface FileItem {
   indexed_at?: string | null
   mime_type?: string | null
   file_size?: number | null
+  can_download?: boolean
+  can_rename?: boolean
+  can_move?: boolean
+  can_copy?: boolean
+  can_delete?: boolean
 }
 
 export interface FileMetaItem extends FileItem {
@@ -22,6 +27,30 @@ export interface FileMetaItem extends FileItem {
   index_error?: string | null
   index_warning?: string | null
   content_hash?: string | null
+}
+
+/** GET /files/{id}/chunk-diagnostics — 索引切块分布（调参/排障） */
+export interface ChunkDiagnostics {
+  file_id: number
+  file_name: string
+  index_status: string
+  pipeline_version?: string | null
+  parent_count: number
+  child_count: number
+  legacy_count: number
+  total_rows: number
+  avg_child_token_count?: number | null
+  avg_child_char_count?: number | null
+  p50_child_char?: number | null
+  p90_child_char?: number | null
+  short_child_ratio: number
+  long_child_ratio: number
+  block_type_counts: Record<string, number>
+  extractor_version?: string | null
+  extractor_rules_version?: string | null
+  parent_block_type_counts?: Record<string, number>
+  max_heading_depth?: number
+  special_block_counts?: Record<string, number>
 }
 
 export interface DashboardSummary {
@@ -68,11 +97,26 @@ export interface DashboardResponse {
   }
 }
 
+export interface FolderViewUi {
+  can_manage_structure: boolean
+  can_create_subfolder: boolean
+  can_upload: boolean
+  can_download_files: boolean
+  can_move_or_delete_files: boolean
+}
+
 export interface FolderItem {
   id: number
   name: string
   parent_id?: number | null
+  scope?: string
+  owner_user_id?: number | null
   created_at: string
+  can_manage_structure?: boolean | null
+  can_open?: boolean
+  can_rename_folder?: boolean
+  can_delete_folder?: boolean
+  can_move_folder?: boolean
 }
 
 export interface FolderTreeItem extends FolderItem {
@@ -89,6 +133,9 @@ export interface FolderChildrenResponse {
   breadcrumbs: BreadcrumbItem[]
   folders: FolderItem[]
   files: FileItem[]
+  ui: FolderViewUi
+  space_label?: string
+  space_kind?: string
 }
 
 export interface GetFilesParams {
@@ -111,16 +158,47 @@ export interface DownloadFileOptions {
   onProgress?: (percent: number) => void
 }
 
+function formatErrorDetail(detail: unknown): string {
+  if (detail == null) return ''
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (item && typeof item === 'object' && 'msg' in item) {
+        return String((item as { msg: unknown }).msg)
+      }
+      return JSON.stringify(item)
+    })
+    return parts.join('; ')
+  }
+  if (typeof detail === 'object') return JSON.stringify(detail)
+  return String(detail)
+}
+
 async function readErrorMessage(
   response: Response,
   fallback: string,
 ): Promise<string> {
-  const errorData = await response.json().catch(() => ({}))
-  return errorData.detail || fallback
+  const statusBit = `HTTP ${response.status}${
+    response.statusText ? ` ${response.statusText}` : ''
+  }`
+  const text = await response.text().catch(() => '')
+  const trimmed = text.trim()
+  if (trimmed) {
+    try {
+      const errorData = JSON.parse(trimmed) as { detail?: unknown }
+      const fromDetail = formatErrorDetail(errorData.detail)
+      if (fromDetail) return fromDetail
+    } catch {
+      /* nginx/HTML 或纯文本错误页 */
+    }
+    const snippet = trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed
+    return `${fallback}（${statusBit}）：${snippet}`
+  }
+  return `${fallback}（${statusBit}）`
 }
 
 export async function getFilesApi(params?: GetFilesParams): Promise<FileItem[]> {
-  const baseUrl = '/api/files'
+  const baseUrl = '/files'
   const searchParams = new URLSearchParams()
 
   if (params?.q) searchParams.append('q', params.q)
@@ -156,7 +234,7 @@ export async function uploadFileApi(
     formData.append('folder_id', String(folderId))
   }
 
-  const response = await uploadWithProgress('/api/files/upload', formData, options)
+  const response = await uploadWithProgress('/files/upload', formData, options)
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '上传失败'))
@@ -166,7 +244,7 @@ export async function uploadFileApi(
 }
 
 export async function getFolderTreeApi(): Promise<FolderTreeItem[]> {
-  const response = await apiFetch('/api/files/folders')
+  const response = await apiFetch('/files/folders')
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '获取文件夹树失败'))
@@ -176,7 +254,7 @@ export async function getFolderTreeApi(): Promise<FolderTreeItem[]> {
 }
 
 export async function getDashboardApi(): Promise<DashboardResponse> {
-  const response = await apiFetch('/api/files/dashboard')
+  const response = await apiFetch('/files/dashboard')
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '获取首页统计失败'))
@@ -188,7 +266,7 @@ export async function getDashboardApi(): Promise<DashboardResponse> {
 export async function getFolderChildrenApi(
   parentId?: number | null,
 ): Promise<FolderChildrenResponse> {
-  const baseUrl = '/api/files/folders/children'
+  const baseUrl = '/files/folders/children'
   const searchParams = new URLSearchParams()
 
   if (parentId !== undefined && parentId !== null) {
@@ -212,7 +290,7 @@ export async function createFolderApi(
   name: string,
   parentId?: number | null,
 ): Promise<FolderItem> {
-  const response = await apiFetch('/api/files/folders', {
+  const response = await apiFetch('/files/folders', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -231,7 +309,7 @@ export async function renameFolderApi(
   folderId: number,
   name: string,
 ): Promise<RenameFolderResult> {
-  const response = await apiFetch(`/api/files/folders/${folderId}/rename`, {
+  const response = await apiFetch(`/files/folders/${folderId}/rename`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -250,7 +328,7 @@ export async function moveFolderApi(
   folderId: number,
   parentId?: number | null,
 ): Promise<MoveFolderResult> {
-  const response = await apiFetch(`/api/files/folders/${folderId}/move`, {
+  const response = await apiFetch(`/files/folders/${folderId}/move`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -267,7 +345,7 @@ export async function moveFolderApi(
 
 export async function deleteFolderApi(folderId: number): Promise<{ message: string }> {
   const response = await apiFetch(
-    `/api/files/folders/${folderId}`,
+    `/files/folders/${folderId}`,
     { method: 'DELETE' },
   )
 
@@ -282,7 +360,7 @@ export async function moveFileApi(
   fileId: number,
   folderId?: number | null,
 ): Promise<MoveFileResult> {
-  const response = await apiFetch(`/api/files/${fileId}/move`, {
+  const response = await apiFetch(`/files/${fileId}/move`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -297,8 +375,46 @@ export async function moveFileApi(
   return response.json()
 }
 
+export async function renameFileApi(
+  fileId: number,
+  fileName: string,
+): Promise<FileItem> {
+  const response = await apiFetch(`/files/${fileId}/rename`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ file_name: fileName }),
+  })
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, '重命名文件失败'))
+  }
+
+  return response.json()
+}
+
+export async function copyFileApi(
+  fileId: number,
+  folderId?: number | null,
+): Promise<MoveFileResult> {
+  const response = await apiFetch(`/files/${fileId}/copy`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ folder_id: folderId ?? null }),
+  })
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, '复制文件失败'))
+  }
+
+  return response.json()
+}
+
 export async function deleteFileApi(fileId: number): Promise<{ message: string }> {
-  const response = await apiFetch(`/api/files/${fileId}`, {
+  const response = await apiFetch(`/files/${fileId}`, {
     method: 'DELETE',
   })
 
@@ -310,7 +426,7 @@ export async function deleteFileApi(fileId: number): Promise<{ message: string }
 }
 
 export async function getFileMetaApi(fileId: number): Promise<FileMetaItem> {
-  const response = await apiFetch(`/api/files/${fileId}/meta`)
+  const response = await apiFetch(`/files/${fileId}/meta`)
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '获取文件详情失败'))
@@ -319,8 +435,16 @@ export async function getFileMetaApi(fileId: number): Promise<FileMetaItem> {
   return response.json()
 }
 
+export async function getChunkDiagnosticsApi(fileId: number): Promise<ChunkDiagnostics> {
+  const response = await apiFetch(`/files/${fileId}/chunk-diagnostics`)
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, '获取 chunk 诊断失败'))
+  }
+  return response.json()
+}
+
 export async function downloadFileApi(fileId: number): Promise<void> {
-  const response = await downloadWithProgress(`/api/files/${fileId}/download`)
+  const response = await downloadWithProgress(`/files/${fileId}/download`)
 
   if (!response.ok) {
     throw new Error(await readErrorMessage(response, '下载文件失败'))
@@ -344,7 +468,7 @@ export async function batchDownloadFilesApi(
   fileIds: number[],
   options?: DownloadFileOptions,
 ): Promise<void> {
-  const response = await downloadWithProgress('/api/files/batch-download', {
+  const response = await downloadWithProgress('/files/batch-download', {
     method: 'POST',
     body: JSON.stringify({ file_ids: fileIds }),
     headers: {
@@ -380,8 +504,7 @@ async function uploadWithProgress(
   if (token) {
     headers.Authorization = `Bearer ${token}`
   }
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim()
-  return xhrRequest(`${baseUrl}${url}`, {
+  return xhrRequest(`${getApiBase()}${url}`, {
     method: 'POST',
     body: formData,
     headers,
@@ -399,8 +522,7 @@ async function downloadWithProgress(
   if (token) {
     headers.set('Authorization', `Bearer ${token}`)
   }
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim()
-  return xhrRequest(`${baseUrl}${url}`, {
+  return xhrRequest(`${getApiBase()}${url}`, {
     method: init.method ?? 'GET',
     body: (init.body as XMLHttpRequestBodyInit | null) ?? null,
     headers: Object.fromEntries(headers.entries()),

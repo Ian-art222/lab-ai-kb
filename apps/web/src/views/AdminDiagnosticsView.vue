@@ -347,17 +347,71 @@ reloadAll()
 </script>
 
 <style scoped>
-.diag-page { display: flex; flex-direction: column; gap: 16px; }
-.page-card { border-radius: var(--card-radius); }
-.header-row { display: flex; justify-content: space-between; align-items: center; }
-.page-title { font-size: 22px; font-weight: 700; }
-.page-subtitle { color: var(--text-secondary); margin-top: 6px; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
-.footer-row { margin-top: 14px; display: flex; justify-content: flex-end; }
-.reason-grid { display: flex; gap: 8px; flex-wrap: wrap; }
-.detail-wrap pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
-.retry-box { margin-top: 12px; }
-.retry-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mb-12 { margin-bottom: 12px; }
-.ml-4 { margin-left: 4px; }
+.diag-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.page-card {
+  border-radius: var(--ds-radius-lg, 16px);
+}
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ds-text, #1f1f1f);
+}
+.page-subtitle {
+  color: var(--ds-text-secondary, #444746);
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 480px;
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.footer-row {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
+.reason-grid {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.detail-wrap pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ds-text-secondary, #444746);
+}
+.retry-box {
+  margin-top: 12px;
+}
+.retry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.mb-12 {
+  margin-bottom: 12px;
+}
+.ml-4 {
+  margin-left: 4px;
+}
 </style>

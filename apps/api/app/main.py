@@ -9,14 +9,19 @@ from app.core.config import settings
 from app.api.auth import router as auth_router
 from app.api.admin_diagnostics import router as admin_diagnostics_router
 
+
+def _parse_cors_origins() -> list[str]:
+    raw = (settings.cors_allowed_origins or "").strip()
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
 app = FastAPI(title=settings.app_name)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

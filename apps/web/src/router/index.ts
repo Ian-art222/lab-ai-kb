@@ -35,20 +35,20 @@ const router = createRouter({
       path: '/users',
       name: 'users',
       component: UsersView,
-      meta: { adminOnly: true },
+      meta: { requiresUserManager: true },
     },
     {
       path: '/settings',
       name: 'settings',
       component: SettingsView,
-      meta: { adminOnly: true },
+      meta: { rootOnly: true },
     },
 
     {
       path: '/admin/diagnostics',
       name: 'admin-diagnostics',
       component: AdminDiagnosticsView,
-      meta: { adminOnly: true },
+      meta: { rootOnly: true },
     },
   ],
 })
@@ -57,6 +57,10 @@ router.beforeEach((to, from, next) => {
   const authStore = useAuthStore()
 
   if (to.path === '/login') {
+    if (authStore.isLoggedIn) {
+      next({ path: '/' })
+      return
+    }
     next()
     return
   }
@@ -66,7 +70,12 @@ router.beforeEach((to, from, next) => {
     return
   }
 
-  if (to.meta.adminOnly && !authStore.isAdmin) {
+  if (to.meta.requiresUserManager && !authStore.canManageUsers) {
+    next('/')
+    return
+  }
+
+  if (to.meta.rootOnly && !authStore.isRoot) {
     next('/')
     return
   }

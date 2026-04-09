@@ -277,10 +277,35 @@ def summarize_tool_trace(tool: str, summary: dict[str, Any] | None = None) -> di
     return {"tool": tool, "summary": summary or {}}
 
 
-def build_session_context(*, session_id: int | None, scope_type: str, folder_id: int | None, file_ids: list[int] | None) -> dict[str, Any]:
-    return {
+def build_session_context(
+    *,
+    session_id: int | None = None,
+    scope_type: str,
+    folder_id: int | None = None,
+    file_ids: list[int] | None = None,
+    task_type: str | None = None,
+    compare_targets: list[Any] | None = None,
+    normalized_query: str | None = None,
+    selected_scope: str | None = None,
+    selected_skill: str | None = None,
+    planner_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ctx: dict[str, Any] = {
         "session_id": session_id,
         "scope_type": scope_type,
         "folder_id": folder_id,
-        "file_ids": file_ids or [],
+        "file_ids": list(file_ids or []),
     }
+    if task_type is not None:
+        ctx["task_type"] = task_type
+    if compare_targets:
+        ctx["compare_targets"] = list(compare_targets)
+    if normalized_query:
+        ctx["normalized_query"] = normalized_query
+    if selected_scope is not None:
+        ctx["selected_scope"] = selected_scope
+    if selected_skill is not None:
+        ctx["selected_skill"] = selected_skill
+    if planner_summary:
+        ctx["planner_summary"] = planner_summary
+    return ctx

@@ -4,11 +4,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "Lab AI KB API"
     app_env: str = "dev"
-    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/lab_ai_kb"
+    database_url: str = "postgresql+psycopg://postgres:LabKb_2026_StrongPass!@db:5432/lab_ai_kb"
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60 * 24
     upload_dir: str = "uploads"
+
+    # 浏览器访问前端的 Origin（逗号分隔），供 FastAPI CORS；与 Nginx 同域时多数请求不触发跨域校验
+    cors_allowed_origins: str = (
+        "http://10.65.218.208:8080,"
+        "http://localhost:8080,http://127.0.0.1:8080,"
+        "http://localhost:5173,http://127.0.0.1:5173"
+    )
 
     # LLM / Embeddings
     llm_provider: str = "openai_compatible"
@@ -61,6 +68,22 @@ class Settings(BaseSettings):
     qa_query_expansion_enabled: bool = False
     qa_query_expansion_max_queries: int = 3
 
+    # Query 理解 / 重写（规则型，接入检索 embedding 与 lexical）
+    qa_enable_query_rewrite: bool = True
+    qa_max_sub_queries: int = 3
+    qa_max_retrieval_queries: int = 8
+    qa_enable_multi_query_for_compare: bool = True
+    qa_enable_multi_query_expansion: bool = True
+    qa_query_rewrite_trace_enabled: bool = False
+
+    # 答案生成层：按意图组织输出、证据保守措辞、冲突提示
+    qa_enable_answer_style_by_query_type: bool = True
+    qa_enable_evidence_sufficiency_guard: bool = True
+    qa_enable_conflict_notice: bool = True
+
+    # 抽取层（PDF/DOCX 等）版本标记，供 diagnostics 展示
+    ingest_extractor_version: str = "extract_v2_rules"
+
     # Source diversity control (relevance-first, not forced multi-source)
     qa_max_chunks_per_doc: int = 2
     qa_target_distinct_docs: int = 3
@@ -89,6 +112,56 @@ class Settings(BaseSettings):
     ingest_min_chunk_chars: int = 80
     ingest_max_index_text_chars: int = 200000
     ingest_pdf_min_chars_per_page: int = 20
+    # v3 结构感知管道：目标为「近似 token」，内部按中英启发式换算为字符预算
+    ingest_structural_chunking_enabled: bool = True
+    ingest_child_target_tokens: int = 220
+    ingest_child_min_tokens: int = 100
+    ingest_child_max_tokens: int = 360
+    ingest_child_overlap_tokens: int = 45
+    ingest_parent_target_tokens: int = 720
+    ingest_parent_min_tokens: int = 350
+    ingest_parent_max_tokens: int = 1100
+    # 问答：命中 parent 上下文后，可拼接同文件相邻 parent（各侧最多 N 段，总附加字符上限）
+    qa_adjacent_parent_max_per_side: int = 1
+    qa_adjacent_parent_max_chars: int = 1200
+    # 仅当相邻 parent 与当前 parent 的 heading_path 一致（或均为空）时才拼接
+    qa_adjacent_parent_same_heading_only: bool = True
+
+    # 检索后：coverage-aware 选择与 packing（多文件覆盖、冗余/垄断惩罚、provenance）
+    qa_enable_coverage_aware_packing: bool = True
+    # 与 qa_max_parents_per_file（旧多样化）区分：coverage 阶段单文件 distinct parent 槽上限
+    qa_coverage_max_parents_per_file: int = 3
+    qa_max_context_chars_per_file: int = 6000
+    qa_max_children_per_parent: int = 2
+    qa_enable_heading_diversity_bonus: bool = True
+    qa_enable_redundancy_penalty_coverage: bool = True
+    qa_redundancy_jaccard_threshold_coverage: float = 0.72
+    qa_enable_dominant_source_penalty: bool = True
+    qa_max_dominant_file_ratio: float = 0.65
+    qa_min_distinct_files_compare: int = 2
+    qa_min_distinct_files_summary: int = 2
+    qa_min_distinct_files_multi_hop: int = 2
+    qa_min_distinct_files_troubleshooting: int = 2
+    qa_enable_citation_provenance: bool = True
+    qa_enable_coverage_diagnostics: bool = True
+    qa_enable_coverage_shortfall_guard: bool = True
+    qa_packing_trace_enabled: bool = False
+
+    # 检索后：parent 级多样化 / 去冗余 / packing（相关性优先，抑制单文档与同段落霸榜）
+    qa_enable_diversification: bool = True
+    qa_enable_mmr_like_rerank: bool = True
+    qa_mmr_lambda: float = 0.7
+    qa_max_parents_per_file: int = 2
+    qa_max_parents_total: int = 6
+    qa_max_parents_per_heading: int = 2
+    qa_parent_similarity_dedup_threshold: float = 0.8
+    qa_same_heading_dedup: bool = True
+    # 多文档时单文件上下文字符软上限比例（相对总 budget，0.55≈55%）
+    qa_pack_per_file_budget_ratio: float = 0.55
+
+    # 调试：在 retrieval_meta 中附带分层追踪（体积可能较大）
+    qa_debug_retrieval_trace_enabled: bool = False
+    qa_debug_store_intermediate_matches: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

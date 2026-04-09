@@ -1,10 +1,11 @@
-import { apiFetch } from './client'
+import { apiFetch, readJsonOk } from './client'
 
 export interface UserItem {
   id: number
   username: string
-  role: 'admin' | 'member'
+  role: 'root' | 'admin' | 'member'
   is_active: boolean
+  can_download: boolean
   created_at: string
   updated_at: string
   last_login_at?: string | null
@@ -13,62 +14,60 @@ export interface UserItem {
 export interface UserCreatePayload {
   username: string
   password: string
-  role: 'admin' | 'member'
+  role: 'root' | 'admin' | 'member'
   is_active: boolean
+  can_download?: boolean
 }
 
 export interface UserUpdatePayload {
-  username: string
-  role: 'admin' | 'member'
+  username?: string
+  role?: 'root' | 'admin' | 'member'
+  can_download?: boolean
 }
 
-async function readError(response: Response, fallback: string): Promise<string> {
-  const data = await response.json().catch(() => ({}))
-  return data.detail || fallback
+export async function getMeApi(): Promise<UserItem> {
+  const response = await apiFetch('/users/me')
+  return readJsonOk<UserItem>(response, '获取当前用户信息失败')
 }
 
 export async function getUsersApi(q?: string): Promise<UserItem[]> {
   const query = q ? `?q=${encodeURIComponent(q)}` : ''
-  const response = await apiFetch(`/api/users${query}`)
-  if (!response.ok) throw new Error(await readError(response, '获取用户列表失败'))
-  return response.json()
+  const response = await apiFetch(`/users${query}`)
+  return readJsonOk<UserItem[]>(response, '获取用户列表失败')
 }
 
 export async function createUserApi(payload: UserCreatePayload): Promise<UserItem> {
-  const response = await apiFetch('/api/users', {
+  const response = await apiFetch('/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await readError(response, '创建用户失败'))
-  return response.json()
+  return readJsonOk<UserItem>(response, '创建用户失败')
 }
 
 export async function updateUserApi(userId: number, payload: UserUpdatePayload): Promise<UserItem> {
-  const response = await apiFetch(`/api/users/${userId}`, {
+  const response = await apiFetch(`/users/${userId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await readError(response, '更新用户失败'))
-  return response.json()
+  return readJsonOk<UserItem>(response, '更新用户失败')
 }
 
 export async function updateUserStatusApi(userId: number, isActive: boolean): Promise<UserItem> {
-  const response = await apiFetch(`/api/users/${userId}/status`, {
+  const response = await apiFetch(`/users/${userId}/status`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ is_active: isActive }),
   })
-  if (!response.ok) throw new Error(await readError(response, '更新用户状态失败'))
-  return response.json()
+  return readJsonOk<UserItem>(response, '更新用户状态失败')
 }
 
 export async function resetUserPasswordApi(userId: number, newPassword: string): Promise<void> {
-  const response = await apiFetch(`/api/users/${userId}/reset-password`, {
+  const response = await apiFetch(`/users/${userId}/reset-password`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_password: newPassword }),
   })
-  if (!response.ok) throw new Error(await readError(response, '重置密码失败'))
+  await readJsonOk<{ message?: string }>(response, '重置密码失败')
 }

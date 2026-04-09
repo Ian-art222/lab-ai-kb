@@ -42,6 +42,9 @@ logs/
 **/.vscode/*
 !**/.vscode/extensions.json
 
+# Local audit / scratch
+.audit-pdfs/
+
 # OS / temp
 .DS_Store
 Thumbs.db

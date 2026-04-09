@@ -48,6 +48,30 @@ class SettingUpdate(BaseModel):
     theme_mode: Literal["warm"]
 
 
+class SettingsShellResponse(BaseModel):
+    """非敏感配置摘要：供 shell / 侧栏 / 问答页使用（不含密钥与连接串）。"""
+
+    system_name: str
+    lab_name: str
+    qa_enabled: bool
+    sidebar_auto_collapse: bool
+    theme_mode: str
+    llm_provider: str
+    llm_model: str
+    llm_configured: bool
+    embedding_provider: str
+    embedding_model: str
+    embedding_configured: bool
+    embedding_batch_size: int | None = None
+    embedding_effective_batch_size: int
+    current_chat_standard: str
+    current_index_standard: str
+    indexed_files_count: int = 0
+    index_standard_mismatch: bool = False
+    index_standard_mismatch_count: int = 0
+    updated_at: datetime
+
+
 class SettingStatus(BaseModel):
     qa_enabled: bool
     llm_provider: str

@@ -1,0 +1,261 @@
+/**
+ * Lab AI KB — Gemini-like enterprise design system
+ * Load after element-plus/dist/index.css
+ */
+
+:root {
+  /* —— 语义色（产品层，兼容旧变量名） —— */
+  --ds-page-bg: #f0f4f9;
+  --ds-surface: #ffffff;
+  --ds-surface-muted: #f0f4f9;
+  --ds-text: #1f1f1f;
+  --ds-text-secondary: #444746;
+  --ds-text-tertiary: #747775;
+  --ds-line: #e6eaf0;
+  --ds-line-subtle: #e0e3e7;
+  --ds-brand: #0b57d0;
+  --ds-brand-hover: #0945a8;
+  --ds-focus-ring: rgba(11, 87, 208, 0.22);
+
+  --ds-success-bg: #e8f5e9;
+  --ds-success-text: #1b5e20;
+  --ds-warning-bg: #fff8e1;
+  --ds-warning-text: #6d4c00;
+  --ds-danger-bg: #ffebee;
+  --ds-danger-text: #b71c1c;
+
+  --ds-radius-sm: 10px;
+  --ds-radius-md: 12px;
+  --ds-radius-lg: 16px;
+  --ds-radius-xl: 20px;
+  --ds-radius-pill: 999px;
+  --ds-shadow-float: 0 4px 12px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.03);
+  --ds-shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+
+  /* 旧变量映射（布局/历史组件） */
+  --app-bg: var(--ds-page-bg);
+  --surface-bg: var(--ds-surface);
+  --card-bg: var(--ds-surface);
+  --border-color: var(--ds-line);
+  --text-primary: var(--ds-text);
+  --text-secondary: var(--ds-text-secondary);
+  --card-radius: var(--ds-radius-lg);
+  --soft-shadow: var(--ds-shadow-float);
+  --success-color: var(--ds-success-text);
+  --warning-color: var(--ds-warning-text);
+  --danger-color: var(--ds-danger-text);
+  --warm-bg-chat: var(--ds-surface-muted);
+  --warm-bg-muted: var(--ds-surface-muted);
+  --warm-border-subtle: var(--ds-line-subtle);
+  --warm-shadow: rgba(0, 0, 0, 0.04);
+  --warm-gradient: linear-gradient(135deg, #0b57d0 0%, #1967d2 100%);
+  --warm-primary: var(--ds-brand);
+  --warm-accent: var(--ds-brand-hover);
+}
+
+/* —— Element Plus 主题令牌 —— */
+html {
+  --el-color-primary: #0b57d0;
+  --el-color-primary-light-3: #4b7fd8;
+  --el-color-primary-light-5: #7a9fe3;
+  --el-color-primary-light-7: #a9bfee;
+  --el-color-primary-light-8: #c1cff4;
+  --el-color-primary-light-9: #d8e2f9;
+  --el-color-primary-dark-2: #0945a8;
+
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f0f4f9;
+  --el-bg-color-overlay: #ffffff;
+
+  --el-text-color-primary: #1f1f1f;
+  --el-text-color-regular: #444746;
+  --el-text-color-secondary: #747775;
+  --el-text-color-placeholder: #9aa0a6;
+  --el-text-color-disabled: #a8adb4;
+
+  --el-border-color: #e6eaf0;
+  --el-border-color-light: #e0e3e7;
+  --el-border-color-lighter: #eceff3;
+  --el-border-color-extra-light: #f0f3f6;
+
+  --el-fill-color: #f0f4f9;
+  --el-fill-color-light: #f0f4f9;
+  --el-fill-color-lighter: #f5f8fb;
+  --el-fill-color-extra-light: #fafbfc;
+  --el-fill-color-blank: #ffffff;
+
+  --el-border-radius-base: 12px;
+  --el-border-radius-small: 10px;
+  --el-border-radius-round: 999px;
+  --el-border-radius-circle: 100%;
+
+  --el-font-size-base: 14px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 12px;
+
+  --el-box-shadow: var(--ds-shadow-float);
+  --el-box-shadow-light: var(--ds-shadow-float);
+  --el-box-shadow-lighter: 0 2px 8px rgba(0, 0, 0, 0.04);
+  --el-box-shadow-dark: 0 8px 24px rgba(0, 0, 0, 0.1);
+
+  --el-disabled-bg-color: #f5f8fb;
+  --el-disabled-text-color: #a8adb4;
+  --el-disabled-border-color: #e0e3e7;
+
+  --el-component-size-large: 40px;
+  --el-component-size: 36px;
+  --el-component-size-small: 28px;
+
+  --el-color-success: #2e7d32;
+  --el-color-warning: #b8860b;
+  --el-color-danger: #c62828;
+  --el-color-info: #5f6368;
+
+  --el-menu-bg-color: transparent;
+  --el-menu-hover-bg-color: rgba(11, 87, 208, 0.06);
+  --el-menu-active-color: var(--el-color-primary);
+}
+
+body {
+  font-family:
+    'Google Sans',
+    'Segoe UI',
+    system-ui,
+    -apple-system,
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  background: var(--ds-page-bg);
+  color: var(--ds-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* —— 全局 Element 组件微调 —— */
+.el-card {
+  border-radius: var(--ds-radius-lg) !important;
+  border: 1px solid var(--ds-line-subtle) !important;
+  background: var(--ds-surface) !important;
+  box-shadow: none !important;
+}
+
+.el-button {
+  border-radius: var(--ds-radius-md) !important;
+  font-weight: 500;
+}
+
+.el-button--primary {
+  background: var(--ds-brand) !important;
+  border-color: var(--ds-brand) !important;
+}
+
+.el-button--primary:hover {
+  background: var(--ds-brand-hover) !important;
+  border-color: var(--ds-brand-hover) !important;
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: var(--ds-radius-md) !important;
+  box-shadow: 0 0 0 1px var(--ds-line) inset !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--ds-brand) inset, 0 0 0 3px var(--ds-focus-ring) !important;
+}
+
+.el-dialog,
+.el-drawer .el-drawer__body {
+  border-radius: var(--ds-radius-lg);
+}
+
+.el-dialog {
+  border-radius: var(--ds-radius-lg) !important;
+  box-shadow: var(--ds-shadow-popover) !important;
+}
+
+.el-dropdown-menu {
+  border-radius: var(--ds-radius-md) !important;
+  border: 1px solid var(--ds-line-subtle) !important;
+  box-shadow: var(--ds-shadow-popover) !important;
+  padding: 6px !important;
+}
+
+.el-dropdown-menu__item {
+  border-radius: 8px;
+}
+
+.el-tag {
+  border-radius: var(--ds-radius-pill) !important;
+  border: none !important;
+  font-weight: 500;
+}
+
+.el-tag--success {
+  --el-tag-bg-color: var(--ds-success-bg);
+  --el-tag-text-color: var(--ds-success-text);
+}
+
+.el-tag--warning {
+  --el-tag-bg-color: var(--ds-warning-bg);
+  --el-tag-text-color: var(--ds-warning-text);
+}
+
+.el-tag--danger {
+  --el-tag-bg-color: var(--ds-danger-bg);
+  --el-tag-text-color: var(--ds-danger-text);
+}
+
+.el-tag--info {
+  --el-tag-bg-color: #e8eef7;
+  --el-tag-text-color: #444746;
+}
+
+.el-breadcrumb__inner.is-link:hover {
+  color: var(--ds-brand) !important;
+}
+
+.el-table {
+  --el-table-header-bg-color: #fafbfc;
+  --el-table-header-text-color: var(--ds-text-secondary);
+  --el-table-row-hover-bg-color: rgba(11, 87, 208, 0.04);
+  --el-table-border-color: var(--ds-line-subtle);
+  --el-table-bg-color: var(--ds-surface);
+  --el-table-tr-bg-color: var(--ds-surface);
+  border-radius: var(--ds-radius-md);
+  overflow: hidden;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.el-tree {
+  --el-tree-node-hover-bg-color: rgba(11, 87, 208, 0.06);
+}
+
+.el-menu {
+  border-right: none !important;
+}
+
+.el-tabs__header {
+  margin-bottom: 16px;
+}
+
+.el-empty {
+  padding: 32px 16px;
+}
+
+.el-popper.is-light,
+.el-popper.is-light > .el-popper__arrow::before {
+  border-color: var(--ds-line-subtle) !important;
+}
+
+/* 页面主槽统一内边距 */
+.ds-page-main {
+  padding: 24px 28px 32px !important;
+}

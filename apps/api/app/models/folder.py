@@ -21,6 +21,13 @@ class Folder(Base):
         nullable=True,
         index=True,
     )
+    # public: 公共知识库树；admin_private: 某个 admin 的个人目录（挂在「个人文件夹」下）
+    scope: Mapped[str] = mapped_column(String(32), default="public", nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

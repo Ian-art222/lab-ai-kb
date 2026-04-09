@@ -11,3 +11,4 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     username: str
     role: str
+    can_download: bool

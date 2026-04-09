@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.auth import require_admin
+from app.core.auth import require_root
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.diagnostics import (
@@ -38,7 +38,7 @@ def get_traces(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    _: User = Depends(require_root),
 ):
     return list_traces(
         db,
@@ -58,7 +58,7 @@ def get_traces(
 @router.get("/traces/stats/reasons", response_model=list[TraceReasonStatItem])
 def get_reason_stats(
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    _: User = Depends(require_root),
 ):
     return list_reason_code_stats(db)
 
@@ -67,7 +67,7 @@ def get_reason_stats(
 def get_trace(
     trace_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    _: User = Depends(require_root),
 ):
     return get_trace_detail(db, trace_id=trace_id)
 
@@ -76,7 +76,7 @@ def get_trace(
 def export_trace_json(
     trace_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    _: User = Depends(require_root),
 ):
     return export_trace(db, trace_id=trace_id)
 
@@ -86,7 +86,7 @@ def retry_index(
     file_id: int,
     force_reindex: bool = False,
     db: Session = Depends(get_db),
-    _: User = Depends(require_admin),
+    _: User = Depends(require_root),
 ):
     file_record = retry_or_reindex_file(db, file_id=file_id, force_reindex=force_reindex)
     return {

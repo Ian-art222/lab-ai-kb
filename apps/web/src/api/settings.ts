@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, readJsonOk } from './client'
 
 export interface SettingItem {
   system_name: string
@@ -24,6 +24,28 @@ export interface SettingItem {
   last_embedding_test_success?: boolean | null
   last_embedding_test_at?: string | null
   last_embedding_test_detail?: string | null
+  updated_at: string
+}
+
+export interface SettingsShellResponse {
+  system_name: string
+  lab_name: string
+  qa_enabled: boolean
+  sidebar_auto_collapse: boolean
+  theme_mode: string
+  llm_provider: string
+  llm_model: string
+  llm_configured: boolean
+  embedding_provider: string
+  embedding_model: string
+  embedding_configured: boolean
+  embedding_batch_size?: number | null
+  embedding_effective_batch_size: number
+  current_chat_standard: string
+  current_index_standard: string
+  indexed_files_count: number
+  index_standard_mismatch: boolean
+  index_standard_mismatch_count: number
   updated_at: string
 }
 
@@ -75,31 +97,28 @@ export interface SettingUpdatePayload {
   theme_mode: string
 }
 
-async function readError(response: Response, fallback: string): Promise<string> {
-  const data = await response.json().catch(() => ({}))
-  return data.detail || fallback
+export async function getSettingsShellApi(): Promise<SettingsShellResponse> {
+  const response = await apiFetch('/settings/shell')
+  return readJsonOk<SettingsShellResponse>(response, '获取系统配置摘要失败')
 }
 
 export async function getSettingsApi(): Promise<SettingItem> {
-  const response = await apiFetch('/api/settings')
-  if (!response.ok) throw new Error(await readError(response, '获取系统设置失败'))
-  return response.json()
+  const response = await apiFetch('/settings')
+  return readJsonOk<SettingItem>(response, '获取系统设置失败')
 }
 
 export async function updateSettingsApi(payload: SettingUpdatePayload): Promise<SettingItem> {
-  const response = await apiFetch('/api/settings', {
+  const response = await apiFetch('/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await readError(response, '保存系统设置失败'))
-  return response.json()
+  return readJsonOk<SettingItem>(response, '保存系统设置失败')
 }
 
 export async function getSettingsStatusApi(): Promise<SettingStatus> {
-  const response = await apiFetch('/api/settings/status')
-  if (!response.ok) throw new Error(await readError(response, '获取配置状态失败'))
-  return response.json()
+  const response = await apiFetch('/settings/status')
+  return readJsonOk<SettingStatus>(response, '获取配置状态失败')
 }
 
 export async function testEmbeddingConnectionApi(payload: {
@@ -108,13 +127,12 @@ export async function testEmbeddingConnectionApi(payload: {
   api_key: string
   model: string
 }): Promise<ConnectionTestResult> {
-  const response = await apiFetch('/api/settings/test/embedding', {
+  const response = await apiFetch('/settings/test/embedding', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await readError(response, 'Embedding 测试失败'))
-  return response.json()
+  return readJsonOk<ConnectionTestResult>(response, 'Embedding 测试失败')
 }
 
 export async function testLlmConnectionApi(payload: {
@@ -123,11 +141,10 @@ export async function testLlmConnectionApi(payload: {
   api_key: string
   model: string
 }): Promise<ConnectionTestResult> {
-  const response = await apiFetch('/api/settings/test/llm', {
+  const response = await apiFetch('/settings/test/llm', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error(await readError(response, 'LLM 测试失败'))
-  return response.json()
+  return readJsonOk<ConnectionTestResult>(response, 'LLM 测试失败')
 }

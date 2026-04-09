@@ -36,15 +36,15 @@
             <el-icon><ChatDotRound /></el-icon>
             <template #title>智能问答</template>
           </el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin" index="/users">
+          <el-menu-item v-if="authStore.canManageUsers" index="/users">
             <el-icon><User /></el-icon>
             <template #title>用户管理</template>
           </el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin" index="/admin/diagnostics">
+          <el-menu-item v-if="authStore.isRoot" index="/admin/diagnostics">
             <el-icon><DataAnalysis /></el-icon>
             <template #title>诊断中心</template>
           </el-menu-item>
-          <el-menu-item v-if="authStore.isAdmin" index="/settings">
+          <el-menu-item v-if="authStore.isRoot" index="/settings">
             <el-icon><Setting /></el-icon>
             <template #title>系统设置</template>
           </el-menu-item>
@@ -68,19 +68,25 @@
         <header class="topbar">
           <div>
             <div class="topbar-title">{{ systemStore.systemName }}</div>
-            <div class="topbar-subtitle">温暖、亲和、可持续演进的实验室知识库</div>
+            <div class="topbar-subtitle">企业知识库 · 文件中心 · 智能检索问答</div>
           </div>
 
           <div class="topbar-actions">
             <el-tag effect="light" class="role-tag">
-              {{ authStore.isAdmin ? '管理员' : '成员' }}
+              {{
+                authStore.isRoot
+                  ? '超级管理员'
+                  : authStore.isAdmin
+                    ? '管理员'
+                    : '成员'
+              }}
             </el-tag>
             <span class="username-text">当前用户：{{ authStore.username || '未登录' }}</span>
             <el-button class="logout-btn" @click="handleLogout">退出登录</el-button>
           </div>
         </header>
 
-        <main class="page-main">
+        <main class="page-main ds-page-main">
           <slot />
         </main>
       </div>
@@ -95,6 +101,7 @@ import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useSystemStore } from '../stores/system'
+import { getMeApi } from '../api/users'
 
 const $route = useRoute()
 const router = useRouter()
@@ -175,6 +182,14 @@ watch(
 )
 
 onMounted(async () => {
+  if (authStore.isLoggedIn) {
+    try {
+      const me = await getMeApi()
+      authStore.syncFromMe(me)
+    } catch {
+      // ignore profile refresh failures
+    }
+  }
   if (!systemStore.loaded) {
     try {
       await systemStore.fetchSettings()
@@ -203,7 +218,7 @@ onBeforeUnmount(() => {
 .layout-shell {
   min-height: 100vh;
   display: flex;
-  background: var(--app-bg);
+  background: var(--ds-page-bg, #f0f4f9);
 }
 
 .sidebar {
@@ -211,16 +226,16 @@ onBeforeUnmount(() => {
   --sidebar-transition-ease: cubic-bezier(0.33, 1, 0.68, 1);
   width: 256px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, #fff6ee 0%, #ffefe4 100%);
-  border-right: 1px solid var(--border-color);
+  background: #fff;
+  border-right: 1px solid var(--ds-line-subtle, #e0e3e7);
   display: flex;
   flex-direction: column;
-  padding: 18px 12px;
+  padding: 20px 14px;
   overflow: hidden;
   transition:
     width var(--sidebar-transition-duration) var(--sidebar-transition-ease),
     box-shadow 0.35s ease;
-  box-shadow: var(--soft-shadow);
+  box-shadow: none;
   z-index: 10;
 }
 
@@ -265,14 +280,16 @@ onBeforeUnmount(() => {
 .brand-mark {
   width: 44px;
   height: 44px;
-  border-radius: 14px;
-  background: var(--warm-gradient);
+  border-radius: 12px;
+  background: linear-gradient(145deg, #0b57d0, #1967d2);
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 800;
-  box-shadow: var(--soft-shadow);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: -0.02em;
+  box-shadow: 0 2px 8px rgba(11, 87, 208, 0.22);
 }
 
 .brand-title {
@@ -301,12 +318,13 @@ onBeforeUnmount(() => {
 }
 
 :deep(.sidebar-menu .el-menu-item.is-active) {
-  background: rgba(240, 170, 120, 0.22);
-  color: #a14f22;
+  background: rgba(11, 87, 208, 0.08);
+  color: var(--ds-brand, #0b57d0);
+  font-weight: 600;
 }
 
 :deep(.sidebar-menu .el-menu-item:hover) {
-  background: rgba(255, 188, 140, 0.14);
+  background: rgba(11, 87, 208, 0.05);
 }
 
 /* 与侧栏 width 动画对齐，减轻菜单与外壳「各动各的」的顿挫感 */
@@ -325,15 +343,14 @@ onBeforeUnmount(() => {
 }
 
 .side-action {
-  border: 1px solid rgba(230, 195, 170, 0.55);
-  background: rgba(255, 252, 248, 0.95);
-  color: #b55f28;
-  box-shadow: 0 2px 10px rgba(200, 140, 95, 0.08);
+  border: 1px solid var(--ds-line-subtle, #e0e3e7);
+  background: #f5f8fb;
+  color: var(--text-secondary);
 }
 
 .side-action:hover {
-  border-color: rgba(215, 170, 130, 0.65);
-  color: #9c4f1c;
+  border-color: var(--ds-line, #e6eaf0);
+  color: var(--ds-brand, #0b57d0);
   background: #fff;
 }
 
@@ -349,15 +366,15 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  padding: 18px 24px;
-  background: linear-gradient(135deg, rgba(255, 244, 232, 0.96), rgba(255, 250, 244, 0.99));
-  border-bottom: 1px solid var(--border-color);
-  backdrop-filter: blur(10px);
+  padding: 18px 28px;
+  background: #fff;
+  border-bottom: 1px solid var(--ds-line-subtle, #e0e3e7);
 }
 
 .topbar-title {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
@@ -376,7 +393,6 @@ onBeforeUnmount(() => {
 
 .role-tag {
   border-radius: 999px;
-  border-color: rgba(220, 185, 155, 0.45) !important;
 }
 
 .username-text {
@@ -385,22 +401,22 @@ onBeforeUnmount(() => {
 }
 
 .logout-btn {
-  border-radius: 999px;
-  border: 1px solid rgba(215, 175, 145, 0.5);
-  background: rgba(255, 252, 248, 0.95);
+  border-radius: 12px;
+  border: 1px solid var(--ds-line-subtle, #e0e3e7);
+  background: #fff;
   color: var(--text-primary);
 }
 
 .logout-btn:hover {
-  border-color: rgba(200, 155, 115, 0.6);
-  background: #fff;
-  color: var(--warm-accent, #d97a3e);
+  border-color: var(--ds-brand, #0b57d0);
+  color: var(--ds-brand, #0b57d0);
+  background: rgba(11, 87, 208, 0.04);
 }
 
 .page-main {
   flex: 1;
-  padding: 20px;
-  background: var(--app-bg);
+  min-width: 0;
+  background: var(--ds-page-bg, #f0f4f9);
 }
 
 </style>

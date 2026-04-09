@@ -13,7 +13,7 @@ from app.models.user import User
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("Usage: python scripts/create_admin.py <username> <password>")
+        print("Usage: python scripts/create_admin.py <username> <password>  # creates/updates root")
         return 1
 
     username = sys.argv[1].strip()
@@ -28,24 +28,26 @@ def main() -> int:
         now = datetime.now(UTC).replace(tzinfo=None)
         if existing:
             existing.password_hash = hash_password(password)
-            existing.role = "admin"
+            existing.role = "root"
             existing.is_active = True
+            existing.can_download = True
             existing.updated_at = now
             db.commit()
-            print(f"Updated existing user '{username}' as admin.")
+            print(f"Updated existing user '{username}' as root.")
             return 0
 
         user = User(
             username=username,
             password_hash=hash_password(password),
-            role="admin",
+            role="root",
             is_active=True,
+            can_download=True,
             created_at=now,
             updated_at=now,
         )
         db.add(user)
         db.commit()
-        print(f"Created admin user '{username}'.")
+        print(f"Created root user '{username}'.")
         return 0
     finally:
         db.close()

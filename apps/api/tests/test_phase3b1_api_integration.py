@@ -132,10 +132,12 @@ def test_phase3b1_api_endpoint_chain(monkeypatch):
         }
 
     monkeypatch.setattr("app.api.qa.run_qa", _run_qa)
+    monkeypatch.setattr("app.api.qa._ensure_ask_scope", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.api.admin_diagnostics.list_traces", lambda _db, **kwargs: {"total": 1, "limit": 50, "offset": 0, "items": [trace_store[kwargs["trace_id"]]]})
     monkeypatch.setattr("app.api.admin_diagnostics.get_trace_detail", lambda _db, trace_id: trace_store[trace_id])
 
     user = SimpleNamespace(id=7, role="admin")
+    root_user = SimpleNamespace(id=7, role="root")
     db = SimpleNamespace()
 
     compare = ask_question(AskRequest(question="请比较A和B", scope_type="all", strict_mode=True, top_k=6), db=db, current_user=user)
@@ -152,10 +154,10 @@ def test_phase3b1_api_endpoint_chain(monkeypatch):
     scoped = ask_question(AskRequest(question="文件范围问题", scope_type="files", file_ids=[1], strict_mode=True, top_k=6), db=db, current_user=user)
     assert scoped["retrieval_meta"]["selected_scope"] == "explicit_file_scope"
 
-    trace_list = get_traces(trace_id=guardrail_trace_id, db=db, _=user)
+    trace_list = get_traces(trace_id=guardrail_trace_id, db=db, _=root_user)
     assert trace_list["items"][0]["guardrail_events"]
 
-    detail = get_trace(trace_id=guardrail_trace_id, db=db, _=user)
+    detail = get_trace(trace_id=guardrail_trace_id, db=db, _=root_user)
     assert detail["source_count"] == 2
     assert detail["dominant_source_ratio"] == 0.5
     assert detail["multi_source_coverage"] == 0.67

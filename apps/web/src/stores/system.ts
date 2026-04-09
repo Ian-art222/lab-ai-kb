@@ -2,8 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import {
-  getSettingsApi,
-  getSettingsStatusApi,
+  getSettingsShellApi,
   type SettingItem,
   type SettingStatus,
 } from '../api/settings'
@@ -57,8 +56,41 @@ export const useSystemStore = defineStore('system', () => {
   const labName = computed(() => settings.value.lab_name || '实验室内部')
 
   const fetchSettings = async () => {
-    settings.value = await getSettingsApi()
-    status.value = await getSettingsStatusApi()
+    const shell = await getSettingsShellApi()
+    settings.value = {
+      ...defaultSettings,
+      system_name: shell.system_name,
+      lab_name: shell.lab_name,
+      qa_enabled: shell.qa_enabled,
+      sidebar_auto_collapse: shell.sidebar_auto_collapse,
+      theme_mode: shell.theme_mode,
+      llm_provider: shell.llm_provider,
+      llm_model: shell.llm_model,
+      embedding_provider: shell.embedding_provider,
+      embedding_model: shell.embedding_model,
+      embedding_batch_size: shell.embedding_batch_size ?? null,
+      embedding_effective_batch_size: shell.embedding_effective_batch_size,
+      updated_at: shell.updated_at,
+    }
+    status.value = {
+      ...defaultStatus,
+      qa_enabled: shell.qa_enabled,
+      llm_provider: shell.llm_provider,
+      llm_model: shell.llm_model,
+      llm_configured: shell.llm_configured,
+      embedding_provider: shell.embedding_provider,
+      embedding_model: shell.embedding_model,
+      embedding_configured: shell.embedding_configured,
+      embedding_batch_size: shell.embedding_batch_size ?? null,
+      embedding_effective_batch_size: shell.embedding_effective_batch_size,
+      current_chat_standard: shell.current_chat_standard,
+      current_index_standard: shell.current_index_standard,
+      indexed_files_count: shell.indexed_files_count,
+      index_standard_mismatch: shell.index_standard_mismatch,
+      index_standard_mismatch_count: shell.index_standard_mismatch_count,
+      sidebar_auto_collapse: shell.sidebar_auto_collapse,
+      theme_mode: shell.theme_mode,
+    }
     loaded.value = true
   }
 

@@ -15,6 +15,7 @@ from app.core.config import settings as app_settings
 from app.models.file_record import FileRecord
 from app.models.knowledge import KnowledgeChunk
 from app.models.system_setting import SystemSetting
+from app.services import chunk_pipeline
 from app.services.model_service import embed_texts
 from app.services.settings_service import (
     build_embedding_index_standard,
@@ -29,6 +30,7 @@ MAX_INDEX_TEXT_CHARS = app_settings.ingest_max_index_text_chars
 
 logger = logging.getLogger(__name__)
 PIPELINE_VERSION = "v2_phase2"
+PIPELINE_VERSION_STRUCTURAL = chunk_pipeline.PIPELINE_VERSION
 
 
 def _set_index_stage(db: Session, file_record: FileRecord, stage: str) -> None:
@@ -60,14 +62,6 @@ def _extract_text(file_record: FileRecord, file_path: Path) -> str:
         return "\n".join([paragraph for paragraph in paragraphs if paragraph])
 
     raise ValueError(f"暂不支持该文件类型索引：{file_type or 'unknown'}")
-
-
-def _normalize_pdf_text(raw: str) -> str:
-    text = raw.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"-\n(?=\w)", "", text)
-    text = re.sub(r"[ \t]+\n", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
 
 
 def _split_markdown_sections(text: str) -> list[dict]:
@@ -184,7 +178,7 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
         segments: list[dict] = []
         weak_pages = 0
         for index, page in enumerate(reader.pages):
-            page_text = _normalize_pdf_text(page.extract_text() or "")
+            page_text = chunk_pipeline.normalize_pdf_page_text(page.extract_text() or "")
             if page_text:
                 if len(page_text.strip()) < app_settings.ingest_pdf_min_chars_per_page:
                     weak_pages += 1
@@ -365,6 +359,7 @@ def _mark_index_success(
     index_embedding_provider: str | None,
     index_embedding_model: str | None,
     index_embedding_dimension: int | None,
+    pipeline_version: str | None = None,
 ) -> FileRecord:
     file_record.extracted_text_length = extracted_text_length
     file_record.index_status = "partial_failed" if warnings else "indexed"
@@ -376,7 +371,7 @@ def _mark_index_success(
     file_record.index_embedding_provider = index_embedding_provider
     file_record.index_embedding_model = index_embedding_model
     file_record.index_embedding_dimension = index_embedding_dimension
-    file_record.pipeline_version = PIPELINE_VERSION
+    file_record.pipeline_version = pipeline_version or PIPELINE_VERSION
     db.commit()
     db.refresh(file_record)
     return file_record
@@ -428,7 +423,11 @@ def ingest_file_job(
         file_record.index_embedding_provider = None
         file_record.index_embedding_model = None
         file_record.index_embedding_dimension = None
-        file_record.pipeline_version = PIPELINE_VERSION
+        file_record.pipeline_version = (
+            PIPELINE_VERSION_STRUCTURAL
+            if app_settings.ingest_structural_chunking_enabled
+            else PIPELINE_VERSION
+        )
         db.commit()
         db.refresh(file_record)
     file_path = _resolve_file_path(file_record)
@@ -441,101 +440,105 @@ def ingest_file_job(
 
         text = _extract_text(file_record, file_path)
         _set_index_stage(db, file_record, "parsing")
-        segments = _extract_segments(file_record, file_path)
         if not text.strip():
             raise ValueError("文件解析完成，但未提取到可用文本内容")
 
-        limited_segments, truncated = _limit_segments(segments)
         _set_index_stage(db, file_record, "chunking")
         warnings: list[str] = []
-        if truncated:
-            warnings.append(f"文件文本较长，本次仅截取前 {MAX_INDEX_TEXT_CHARS} 个字符建立索引")
+        active_pipeline = PIPELINE_VERSION
 
-        # Unified in-memory spec for DB rows (parent = segment-level, child = _chunk_text slices).
-        # parent_ref: index into this list for the parent row; None for parent rows.
-        # parent_chunk_id FK is not filled here (second pass / separate change).
-        rows_spec: list[dict] = []
-        for seg_idx, segment in enumerate(limited_segments):
-            seg_text = segment["text"].strip()
-            if not seg_text:
-                continue
-            page_no = segment.get("page_number")
-            section_guess = segment.get("section_title") or _guess_section_title(seg_text)
-            block_type = segment.get("block_type") or "paragraph"
-            section_path = segment.get("section_path") or ([section_guess] if section_guess else [])
-            source_type = segment.get("source_type") or (file_record.file_type or "").lower() or "text"
-            parent_section = segment.get("parent_section") or section_guess
-            seg_hash = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
-            parent_meta = {
-                "doc_id": file_record.id,
-                "file_id": file_record.id,
-                "filename": file_record.file_name,
-                "source_file_name": file_record.file_name,
-                "page_number": page_no,
-                "page_range": [page_no, page_no] if page_no is not None else None,
-                "section_title": section_guess,
-                "section_path": section_path,
-                "parent_section": parent_section,
-                "segment_order": seg_idx,
-                "chunk_role": "parent",
-                "block_type": block_type,
-                "source_type": source_type,
-                "content_hash": seg_hash,
-                "pipeline_version": "v2_phase1",
-            }
-            parent_row_index = len(rows_spec)
-            rows_spec.append(
-                {
-                    "chunk_kind": "parent",
-                    "parent_ref": None,
-                    "content": seg_text,
-                    "chunk_index": -1,
-                    "page_number": page_no,
-                    "section_title": section_guess,
-                    "metadata_json": dict(parent_meta),
-                }
-            )
-            segment_chunks, segment_warning = _chunk_text(
-                seg_text,
-                page_number=page_no,
-                section_title=section_guess,
-                block_type=block_type,
-            )
-            for ci, ch in enumerate(segment_chunks or []):
-                child_meta = {
+        if app_settings.ingest_structural_chunking_enabled:
+            rows_spec, pipe_warnings = chunk_pipeline.build_rows_spec(file_record, file_path)
+            warnings.extend(pipe_warnings)
+            active_pipeline = PIPELINE_VERSION_STRUCTURAL
+        else:
+            segments = _extract_segments(file_record, file_path)
+            limited_segments, truncated = _limit_segments(segments)
+            if truncated:
+                warnings.append(f"文件文本较长，本次仅截取前 {MAX_INDEX_TEXT_CHARS} 个字符建立索引")
+
+            rows_spec = []
+            for seg_idx, segment in enumerate(limited_segments):
+                seg_text = segment["text"].strip()
+                if not seg_text:
+                    continue
+                page_no = segment.get("page_number")
+                section_guess = segment.get("section_title") or _guess_section_title(seg_text)
+                block_type = segment.get("block_type") or "paragraph"
+                section_path = segment.get("section_path") or ([section_guess] if section_guess else [])
+                source_type = segment.get("source_type") or (file_record.file_type or "").lower() or "text"
+                parent_section = segment.get("parent_section") or section_guess
+                seg_hash = hashlib.sha256(seg_text.encode("utf-8")).hexdigest()
+                parent_meta = {
                     "doc_id": file_record.id,
                     "file_id": file_record.id,
                     "filename": file_record.file_name,
                     "source_file_name": file_record.file_name,
-                    "page_number": ch.get("page_number"),
-                    "page_range": [ch.get("page_number"), ch.get("page_number")]
-                    if ch.get("page_number") is not None
-                    else None,
-                    "section_title": ch.get("section_title"),
+                    "page_number": page_no,
+                    "page_range": [page_no, page_no] if page_no is not None else None,
+                    "section_title": section_guess,
                     "section_path": section_path,
                     "parent_section": parent_section,
                     "segment_order": seg_idx,
-                    "child_index_in_segment": ci,
-                    "chunk_role": "child",
-                    "parent_row_index": parent_row_index,
-                    "block_type": ch.get("block_type") or block_type,
+                    "chunk_role": "parent",
+                    "block_type": block_type,
                     "source_type": source_type,
-                    "content_hash": hashlib.sha256(ch["content"].encode("utf-8")).hexdigest(),
+                    "content_hash": seg_hash,
                     "pipeline_version": "v2_phase1",
                 }
+                parent_row_index = len(rows_spec)
                 rows_spec.append(
                     {
-                        "chunk_kind": "child",
-                        "parent_ref": parent_row_index,
-                        "content": ch["content"],
+                        "chunk_kind": "parent",
+                        "parent_ref": None,
+                        "content": seg_text,
                         "chunk_index": -1,
-                        "page_number": ch.get("page_number"),
-                        "section_title": ch.get("section_title"),
-                        "metadata_json": child_meta,
+                        "page_number": page_no,
+                        "section_title": section_guess,
+                        "metadata_json": dict(parent_meta),
                     }
                 )
-            if segment_warning and segment_warning not in warnings:
-                warnings.append(segment_warning)
+                segment_chunks, segment_warning = _chunk_text(
+                    seg_text,
+                    page_number=page_no,
+                    section_title=section_guess,
+                    block_type=block_type,
+                )
+                for ci, ch in enumerate(segment_chunks or []):
+                    child_meta = {
+                        "doc_id": file_record.id,
+                        "file_id": file_record.id,
+                        "filename": file_record.file_name,
+                        "source_file_name": file_record.file_name,
+                        "page_number": ch.get("page_number"),
+                        "page_range": [ch.get("page_number"), ch.get("page_number")]
+                        if ch.get("page_number") is not None
+                        else None,
+                        "section_title": ch.get("section_title"),
+                        "section_path": section_path,
+                        "parent_section": parent_section,
+                        "segment_order": seg_idx,
+                        "child_index_in_segment": ci,
+                        "chunk_role": "child",
+                        "parent_row_index": parent_row_index,
+                        "block_type": ch.get("block_type") or block_type,
+                        "source_type": source_type,
+                        "content_hash": hashlib.sha256(ch["content"].encode("utf-8")).hexdigest(),
+                        "pipeline_version": "v2_phase1",
+                    }
+                    rows_spec.append(
+                        {
+                            "chunk_kind": "child",
+                            "parent_ref": parent_row_index,
+                            "content": ch["content"],
+                            "chunk_index": -1,
+                            "page_number": ch.get("page_number"),
+                            "section_title": ch.get("section_title"),
+                            "metadata_json": child_meta,
+                        }
+                    )
+                if segment_warning and segment_warning not in warnings:
+                    warnings.append(segment_warning)
         if not rows_spec:
             raise ValueError("文本内容不足以形成可用索引")
 
@@ -629,6 +632,7 @@ def ingest_file_job(
         for idx, spec in enumerate(rows_spec):
             if spec["chunk_kind"] != "parent":
                 continue
+            meta = spec.get("metadata_json") or {}
             row = KnowledgeChunk(
                 file_id=file_record.id,
                 folder_id=file_record.folder_id,
@@ -636,7 +640,7 @@ def ingest_file_job(
                 content=spec["content"],
                 section_title=spec.get("section_title"),
                 page_number=spec.get("page_number"),
-                token_count=len(spec["content"]),
+                token_count=meta.get("approx_tokens") or chunk_pipeline.approx_tokens(spec["content"]),
                 embedding=None,
                 embedding_vec=None,
                 chunk_kind=spec["chunk_kind"],
@@ -663,6 +667,7 @@ def ingest_file_job(
             ev = None
             if emb and len(emb) == app_settings.qa_pgvector_dimensions:
                 ev = emb
+            cmeta = spec.get("metadata_json") or {}
             row = KnowledgeChunk(
                 file_id=file_record.id,
                 folder_id=file_record.folder_id,
@@ -670,7 +675,7 @@ def ingest_file_job(
                 content=spec["content"],
                 section_title=spec.get("section_title"),
                 page_number=spec.get("page_number"),
-                token_count=len(spec["content"]),
+                token_count=cmeta.get("approx_tokens") or chunk_pipeline.approx_tokens(spec["content"]),
                 embedding=emb,
                 embedding_vec=ev,
                 chunk_kind=spec["chunk_kind"],
@@ -701,6 +706,7 @@ def ingest_file_job(
             index_embedding_provider=index_embedding_provider,
             index_embedding_model=index_embedding_model,
             index_embedding_dimension=index_embedding_dimension,
+            pipeline_version=active_pipeline,
         )
     except Exception as exc:
         logger.exception(

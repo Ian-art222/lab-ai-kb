@@ -4,8 +4,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.permissions import can_view_folder, user_may_access_file_record
 from app.db.session import SessionLocal, get_db
 from app.models.file_record import FileRecord
+from app.models.folder import Folder
 from app.models.user import User
 from app.services.ingest_service import ingest_file_job as run_file_ingest
 from app.services.qa_service import (
@@ -30,6 +32,18 @@ _active_ingest_lock = Lock()
 _ACTIVE_INDEX_STATUSES = {"indexing", "parsing", "chunking", "embedding", "reindexing"}
 
 
+def _ensure_ask_scope(db: Session, user: User, payload: AskRequest) -> None:
+    if payload.scope_type == "folder" and payload.folder_id is not None:
+        folder = db.query(Folder).filter(Folder.id == payload.folder_id).first()
+        if not folder or not can_view_folder(db, user, folder):
+            raise HTTPException(status_code=403, detail="无权在该目录范围内问答")
+    if payload.scope_type == "files" and payload.file_ids:
+        for fid in payload.file_ids:
+            fr = db.query(FileRecord).filter(FileRecord.id == fid).first()
+            if not fr or not user_may_access_file_record(db, user, fr):
+                raise HTTPException(status_code=403, detail="所选文件不可用")
+
+
 def _run_ingest_in_background(file_id: int) -> None:
     db = SessionLocal()
     try:
@@ -51,6 +65,7 @@ def ask_question(
 ):
     session = None
     try:
+        _ensure_ask_scope(db, current_user, payload)
         session = ensure_session(
             db,
             user_id=current_user.id,
@@ -72,6 +87,8 @@ def ask_question(
             dedupe_adjacent_chunks=payload.dedupe_adjacent_chunks,
             rerank_enabled=payload.rerank_enabled,
             rerank_top_n=payload.rerank_top_n,
+            session_id=session.id,
+            current_user=current_user,
         )
         _, assistant_message = append_qa_messages(
             db,
@@ -170,6 +187,8 @@ def ingest_file(
     file_record = db.query(FileRecord).filter(FileRecord.id == payload.file_id).first()
     if not file_record:
         raise HTTPException(status_code=404, detail="文件不存在")
+    if not user_may_access_file_record(db, current_user, file_record):
+        raise HTTPException(status_code=403, detail="无权对该文件执行索引")
 
     with _active_ingest_lock:
         already_running = payload.file_id in _active_ingest_file_ids or file_record.index_status in _ACTIVE_INDEX_STATUSES
@@ -213,6 +232,8 @@ def get_file_index_status(
     file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
     if not file_record:
         raise HTTPException(status_code=404, detail="文件不存在")
+    if not user_may_access_file_record(db, current_user, file_record):
+        raise HTTPException(status_code=403, detail="无权查看该文件索引状态")
 
     return {
         "file_id": file_record.id,

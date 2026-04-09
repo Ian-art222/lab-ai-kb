@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IngestFileRequest(BaseModel):
@@ -26,6 +26,8 @@ class AskRequest(BaseModel):
 
 class RetrievalMetaPayload(BaseModel):
     """Normalized retrieval metadata returned on successful /api/qa/ask responses."""
+
+    model_config = ConfigDict(extra="allow")
 
     retrieval_strategy: str = Field(
         description="Runtime strategy label, e.g. pgvector_ann_hnsw | app_layer_cosine_topk | fts_websearch_rrf"
@@ -90,6 +92,55 @@ class RetrievalMetaPayload(BaseModel):
     fallback_triggered: bool | None = None
     retrieval_rounds: int | None = None
     stop_reason: str | None = None
+    retrieval_trace: dict[str, Any] | None = None
+    query_understanding: dict[str, Any] | None = None
+    answer_synthesis: dict[str, Any] | None = None
+    coverage_diagnostics: dict[str, Any] | None = Field(
+        default=None,
+        description="Pre/post pack coverage stats, per-query hit counts, packing trace, coverage_shortfall",
+    )
+
+
+class QACitationReferencePayload(BaseModel):
+    """Optional structured citation; API may return extra keys (extra=allow)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    file_id: int | None = None
+    file_name: str | None = None
+    chunk_id: int | None = None
+    chunk_index: int | None = None
+    snippet: str | None = None
+    score: float | None = None
+    heading_path: str | None = None
+    block_type: str | None = None
+    chunk_role: str | None = None
+    context_chunk_role: str | None = None
+    provenance_type: str | None = None
+    provenance_tags: list[str] | None = None
+    source_reason: str | None = None
+    matched_query_index: int | None = None
+    matched_query: str | None = None
+    query_type: str | None = None
+    rerank_score: float | None = None
+    source_file_rank: int | None = None
+    file_char_share: float | None = None
+    parent_chunk_id: int | None = None
+    parent_sequence_index: int | None = None
+
+
+class AnswerSynthesisTracePayload(BaseModel):
+    """Subset of keys written to retrieval_meta.answer_synthesis for typing / OpenAPI."""
+
+    model_config = ConfigDict(extra="allow")
+
+    query_type: str | None = None
+    coverage_assessment: str | None = None
+    coverage_shortfall: bool | None = None
+    requires_multi_source_but_missing: bool | None = None
+    dominant_source_warning: bool | None = None
+    citation_source_count: int | None = None
+    coverage_shortfall_prompt_applied: bool | None = None
 
 
 class AskSuccessResponse(BaseModel):

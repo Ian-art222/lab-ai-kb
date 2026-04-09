@@ -90,6 +90,18 @@ cp apps/api/.env.example apps/api/.env
 docker compose up -d --build
 ```
 
+**仅更新前端 UI 时**：不要只执行 `docker compose build web`，否则运行中的容器仍挂载旧镜像里的静态文件。应重建并替换容器，任选其一：
+
+```bash
+./scripts/docker-rebuild-web.sh
+```
+
+或：
+
+```bash
+docker compose up -d --build --force-recreate web
+```
+
 服务默认端口：
 - Web: `http://127.0.0.1:8080`
 - API: `http://127.0.0.1:8000`

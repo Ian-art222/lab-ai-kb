@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.core.auth import create_access_token
+from app.core.permissions import effective_role, user_effective_can_download
 from app.db.session import get_db
 from app.models.user import User
 from app.core.security import verify_password
@@ -31,5 +32,6 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     return LoginResponse(
         access_token=access_token,
         username=user.username,
-        role=user.role,
+        role=effective_role(user),
+        can_download=user_effective_can_download(user),
     )

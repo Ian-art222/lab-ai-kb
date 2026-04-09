@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_user, require_admin
+from app.core.auth import get_current_user, require_root
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.setting import (
@@ -11,6 +11,7 @@ from app.schemas.setting import (
     EmbeddingConnectionTestRequest,
     LlmConnectionTestRequest,
     SettingItem,
+    SettingsShellResponse,
     SettingStatus,
     SettingUpdate,
 )
@@ -70,10 +71,41 @@ def _validate_embedding_batch_size(*, embedding_provider: str, value: int | None
         )
 
 
+@router.get("/shell", response_model=SettingsShellResponse)
+def get_settings_shell(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    settings = get_or_create_settings(db)
+    item = to_setting_item(settings)
+    st = to_setting_status(settings)
+    return SettingsShellResponse(
+        system_name=item.system_name,
+        lab_name=item.lab_name,
+        qa_enabled=item.qa_enabled,
+        sidebar_auto_collapse=item.sidebar_auto_collapse,
+        theme_mode=item.theme_mode,
+        llm_provider=st.llm_provider,
+        llm_model=st.llm_model,
+        llm_configured=st.llm_configured,
+        embedding_provider=st.embedding_provider,
+        embedding_model=st.embedding_model,
+        embedding_configured=st.embedding_configured,
+        embedding_batch_size=st.embedding_batch_size,
+        embedding_effective_batch_size=st.embedding_effective_batch_size,
+        current_chat_standard=st.current_chat_standard,
+        current_index_standard=st.current_index_standard,
+        indexed_files_count=st.indexed_files_count,
+        index_standard_mismatch=st.index_standard_mismatch,
+        index_standard_mismatch_count=st.index_standard_mismatch_count,
+        updated_at=item.updated_at,
+    )
+
+
 @router.get("", response_model=SettingItem)
 def get_settings(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_root),
 ):
     settings = get_or_create_settings(db)
     return to_setting_item(settings)
@@ -83,7 +115,7 @@ def get_settings(
 def update_settings(
     data: SettingUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_root),
 ):
     _validate_provider_selection(
         llm_provider=data.llm_provider,
@@ -125,7 +157,7 @@ def update_settings(
 @router.get("/status", response_model=SettingStatus)
 def get_settings_status(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_root),
 ):
     settings = get_or_create_settings(db)
     summary = get_index_standard_summary(db, settings)
@@ -136,7 +168,7 @@ def get_settings_status(
 def test_embedding_connection(
     data: EmbeddingConnectionTestRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_root),
 ):
     settings = get_or_create_settings(db)
     provider = data.provider.strip() or settings.embedding_provider
@@ -186,7 +218,7 @@ def test_embedding_connection(
 def test_llm_connection(
     data: LlmConnectionTestRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_root),
 ):
     settings = get_or_create_settings(db)
     provider = data.provider.strip() or settings.llm_provider

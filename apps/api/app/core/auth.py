@@ -6,6 +6,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.permissions import effective_role, user_effective_can_download
 from app.db.session import get_db
 from app.models.user import User
 
@@ -19,7 +20,8 @@ def create_access_token(*, user: User) -> str:
     payload = {
         "sub": str(user.id),
         "username": user.username,
-        "role": user.role,
+        "role": effective_role(user),
+        "can_download": user_effective_can_download(user),
         "exp": expire_at,
     }
     return jwt.encode(
@@ -77,9 +79,27 @@ def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != "admin":
+    if effective_role(current_user) != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="仅管理员可执行此操作",
+        )
+    return current_user
+
+
+def require_root(current_user: User = Depends(get_current_user)) -> User:
+    if effective_role(current_user) != "root":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅系统 root 可执行此操作",
+        )
+    return current_user
+
+
+def require_user_manager(current_user: User = Depends(get_current_user)) -> User:
+    if effective_role(current_user) not in ("root", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权管理用户",
         )
     return current_user
