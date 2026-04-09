@@ -77,6 +77,7 @@ import { ElMessage } from 'element-plus'
 import * as pdfjsLib from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import AdminLayout from '../layouts/AdminLayout.vue'
+import { apiFetch, readApiErrorMessage } from '../api/client'
 import {
   addAttachmentApi,
   askPdfQaApi,
@@ -166,12 +167,21 @@ function jumpToPage(pageNumber?: number | null) {
 }
 
 async function refreshTranslation() {
-  const status = await getPdfTranslationStatusApi(fileId)
-  translationStatus.value = status.status
-  translationProgress.value = status.progress || 0
-  if (status.status === 'completed') {
-    const content = await getPdfTranslationContentApi(fileId)
-    translationItems.value = content.content?.items || []
+  try {
+    const status = await getPdfTranslationStatusApi(fileId)
+    translationStatus.value = status.status || 'not_started'
+    translationProgress.value = status.progress || 0
+    if (status.status === 'completed') {
+      const content = await getPdfTranslationContentApi(fileId)
+      translationItems.value = content.content?.items || []
+    } else {
+      translationItems.value = []
+    }
+  } catch (e) {
+    translationStatus.value = 'not_started'
+    translationItems.value = []
+    const msg = e instanceof Error ? e.message : '获取翻译状态失败'
+    ElMessage.warning(msg)
   }
 }
 
@@ -231,17 +241,40 @@ async function translateSelection() {
 }
 
 onMounted(async () => {
-  docInfo.value = await getPdfDocumentApi(fileId)
-  const loadingTask = pdfjsLib.getDocument(`/api/files/${fileId}/download`)
-  pdfDoc = await loadingTask.promise
-  pageCount.value = pdfDoc.numPages || 0
+  try {
+    docInfo.value = await getPdfDocumentApi(fileId)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '获取文献详情失败')
+    return
+  }
 
-  myAnnotations.value = await getMyAnnotationsApi(fileId)
-  publicUserIds.value = (await listPublicAnnotationUsersApi(fileId)).user_ids || []
-  attachments.value = await listAttachmentsApi(fileId)
+  // PDF.js 用 URL 直连不会带 JWT，会 401 → 左侧空白；改为 apiFetch + ArrayBuffer
+  try {
+    const res = await apiFetch(`/files/${fileId}/download`)
+    if (!res.ok) {
+      throw new Error(await readApiErrorMessage(res, '下载 PDF 失败'))
+    }
+    const buf = await res.arrayBuffer()
+    const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buf) })
+    pdfDoc = await loadingTask.promise
+    pageCount.value = pdfDoc.numPages || 0
+    if (!pageCount.value) {
+      ElMessage.warning('该 PDF 页数为 0，无法渲染')
+    }
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '加载 PDF 失败')
+  }
+
+  try {
+    myAnnotations.value = await getMyAnnotationsApi(fileId)
+    publicUserIds.value = (await listPublicAnnotationUsersApi(fileId)).user_ids || []
+    attachments.value = await listAttachmentsApi(fileId)
+  } catch {
+    /* 侧栏失败不阻塞阅读 */
+  }
+
   await refreshTranslation()
 
-  // optional no-op call to ensure attachment API write path available from UI
   if (attachments.value.length === 0) {
     try {
       await addAttachmentApi(fileId, fileId, '原始文献')

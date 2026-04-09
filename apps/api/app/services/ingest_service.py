@@ -438,9 +438,11 @@ def ingest_file_job(
         if file_record.file_size == 0:
             raise ValueError("文件为空，无法建立索引")
 
-        text = _extract_text(file_record, file_path)
+        # 勿命名为 text：会遮蔽 sqlalchemy.text，导致后续 db.execute(text(...)) 报
+        # TypeError: 'str' object is not callable
+        extracted_full_text = _extract_text(file_record, file_path)
         _set_index_stage(db, file_record, "parsing")
-        if not text.strip():
+        if not extracted_full_text.strip():
             raise ValueError("文件解析完成，但未提取到可用文本内容")
 
         _set_index_stage(db, file_record, "chunking")
@@ -552,7 +554,7 @@ def ingest_file_job(
             file_record.id,
             len(rows_spec),
             len(child_indices),
-            len(text),
+            len(extracted_full_text),
         )
 
         db.query(KnowledgeChunk).filter(KnowledgeChunk.file_id == file_record.id).delete()
@@ -700,7 +702,7 @@ def ingest_file_job(
         return _mark_index_success(
             db,
             file_record=file_record,
-            extracted_text_length=len(text),
+            extracted_text_length=len(extracted_full_text),
             warnings=warnings,
             indexed_at=now,
             index_embedding_provider=index_embedding_provider,
