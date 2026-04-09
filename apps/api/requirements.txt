@@ -9,6 +9,4 @@ passlib
 python-multipart
 PyPDF2
 python-docx
-sentence-transformers>=2.2.2,<3
-torch>=2.0.0,<2.5
 pgvector>=0.2.5

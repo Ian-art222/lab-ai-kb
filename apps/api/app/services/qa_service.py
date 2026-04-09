@@ -1901,7 +1901,11 @@ def _rerank_matches(
     rerank_top_n: int,
     rerank_model_name: str,
 ) -> tuple[list[dict], bool]:
-    """Rerank fused matches using a local cross-encoder.
+    """Rerank fused matches using a local cross-encoder (optional).
+
+    Requires the optional ``sentence-transformers`` package (and its PyTorch stack),
+    which is **not** installed in the default API image to keep builds small on
+    CPU-only servers. When the package is missing, reranking is skipped.
 
     Returns (reranked_matches, rerank_applied).
     - If rerank_enabled is False, returns (matches, False).

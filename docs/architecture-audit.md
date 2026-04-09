@@ -10,7 +10,7 @@
 
 Lab AI KB 是一套**私有化部署**的「网盘式文件中心 + 文本索引 + RAG 问答 + root 级运维诊断」系统。后端为 **FastAPI + SQLAlchemy + Alembic + PostgreSQL/pgvector**，前端为 **Vue 3 + Vite + Element Plus + Pinia**，生产环境通过 **Docker Compose（db / api / web）** 与 **Nginx 反代静态 + `/api`** 交付。
 
-架构上，**文件元数据与二进制**落在 `files` 表与 `UPLOAD_DIR`，**向量与全文检索**落在 `knowledge_chunks`（含 `embedding_vec`、`search_vector`、parent/child 结构），**问答会话与可观测性**落在 `qa_sessions` / `qa_messages` / `qa_retrieval_traces` / `qa_citations`。大模型与 Embedding 通过统一的 **`model_service.chat_completion` / `model_service.embed_texts` + `provider_adapters`** 访问外部 API；**Rerank 当前实现为进程内 `sentence_transformers.CrossEncoder`（可选）**，与 LLM 调用链分离。
+架构上，**文件元数据与二进制**落在 `files` 表与 `UPLOAD_DIR`，**向量与全文检索**落在 `knowledge_chunks`（含 `embedding_vec`、`search_vector`、parent/child 结构），**问答会话与可观测性**落在 `qa_sessions` / `qa_messages` / `qa_retrieval_traces` / `qa_citations`。大模型与 Embedding 通过统一的 **`model_service.chat_completion` / `model_service.embed_texts` + `provider_adapters`** 访问外部 API；**Rerank** 可选地为进程内 `sentence_transformers.CrossEncoder`（**默认镜像不安装** `sentence-transformers`/torch，未安装则跳过 rerank），与 LLM 调用链分离。
 
 **成熟度**：RAG 主链路（scope、检索融合、packing、引用、citation 落库、trace 落库）在代码层面完整；文件权限与目录空间（public / admin_private）已深度集成 `files` API 与 `core/permissions.py`。**未见**独立 Worker/Redis、**未见**在线 PDF 渲染/批注数据模型、**未见**自动「上传即索引」（索引依赖显式触发 `POST /api/qa/ingest/file` 或 UI 操作）。
 
@@ -27,7 +27,7 @@ Lab AI KB 是一套**私有化部署**的「网盘式文件中心 + 文本索引
 | **数据库** | PostgreSQL 16 + pgvector 扩展（镜像 `pgvector/pgvector:pg16`） |
 | **AI / 模型访问** | `app/services/model_service.py`（`chat_completion`、`embed_texts`）、`app/services/provider_adapters.py`（OpenAI / OpenAI-Compatible / Anthropic / Gemini 等适配器） |
 | **检索 / RAG** | `app/services/qa_service.py`（主编排）、`app/services/chunk_pipeline.py`（v3 结构切块）、`app/services/ingest_service.py`（解析→切块→embedding→写库）；配置大量来自 `app/core/config.py` 与 DB `system_settings` |
-| **Rerank** | `qa_service._rerank_matches`：`sentence_transformers.CrossEncoder`（本地 CPU/GPU 模型，可选；未安装库则跳过） |
+| **Rerank** | `qa_service._rerank_matches`：`CrossEncoder`（仅当自行安装 `sentence-transformers` 时启用；默认依赖集不含，避免镜像拉取 torch/CUDA） |
 | **异步任务** | 仅 **FastAPI `BackgroundTasks`**：`/api/qa/ingest/file` 后台跑 `ingest_file_job`；**无** Celery/RQ/独立 worker |
 | **部署** | `docker-compose.yml`：`db`、`api`、`web`；`apps/web/Dockerfile` 多阶段 build + Nginx；`deploy/nginx.lab-ai-kb.conf`：`/api` 反代、`/` SPA、`*.js/css` 长期缓存 |
 | **缓存** | **无** Redis；无应用级 HTTP 缓存层 |
