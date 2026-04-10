@@ -21,7 +21,7 @@ class Folder(Base):
         nullable=True,
         index=True,
     )
-    # public: 公共知识库树；admin_private: 某个 admin 的个人目录（挂在「个人文件夹」下）
+    # public: 公共知识库树；private_root: 顶层「个人文件夹」入口；admin_private: 某 admin 的个人目录（其下）
     scope: Mapped[str] = mapped_column(String(32), default="public", nullable=False)
     owner_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),

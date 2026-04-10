@@ -1,4 +1,4 @@
-"""PDF 文献扩展：与 files 1:1 关联，翻译任务、批注（预留）、附件。"""
+"""PDF 文献扩展：与 files 1:1 关联；批注与附件。翻译任务表仅保留兼容旧库结构。"""
 
 from __future__ import annotations
 

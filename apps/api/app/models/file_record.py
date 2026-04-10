@@ -22,6 +22,10 @@ class FileRecord(Base):
     # Knowledge index status (used by RAG QA)
     index_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 与 index_status 联动：每次状态迁移或心跳刷新；用于僵尸 processing 判定
+    index_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 本轮 ingest 实际进入 indexing 时写入；仅 pending 排队时为 NULL，用于僵尸 pending 判定
+    index_run_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     index_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     index_warning: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

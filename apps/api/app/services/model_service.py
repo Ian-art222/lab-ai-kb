@@ -18,6 +18,25 @@ from app.services.provider_adapters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_openai_alias_for_third_party_base(provider: str | None, api_base: str | None) -> str | None:
+    """provider 填 openai 但 Base URL 为第三方 OpenAI 兼容网关时，改用 openai_compatible 适配器（/chat/completions、/embeddings）。"""
+    p = (provider or "").strip()
+    if not p or p.lower() != "openai":
+        return provider
+    b = (api_base or "").lower()
+    markers = (
+        "bigmodel.cn",
+        "deepseek.com",
+        "dashscope.aliyuncs.com",
+        "dashscope",
+        "moonshot.cn",
+        "openrouter.ai",
+    )
+    if any(m in b for m in markers):
+        return "openai_compatible"
+    return provider
 # Env-only default when callers do not pass DB override (see get_effective_embedding_batch_size).
 MAX_EMBED_REQUESTS_PER_BATCH = max(1, min(settings.embed_batch_size, 100))
 EMBED_RETRY_TIMES = max(0, settings.embed_retry_times)
@@ -33,6 +52,28 @@ def _load_json_dict(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _resolve_embedding_extra_params(
+    *,
+    api_base: str,
+    model: str,
+    explicit_extra: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge env JSON + caller override; 智谱 Embedding-3 未传 dimensions 时默认用 qa_pgvector_dimensions（与 vector(N)+HNSW 对齐）。"""
+    env_extra = _load_json_dict(settings.embedding_extra_params_json)
+    merged: dict[str, Any] = {**env_extra, **(explicit_extra or {})}
+    b = (api_base or "").lower()
+    mnorm = (model or "").strip().lower().replace("_", "-")
+    if "bigmodel.cn" in b and mnorm == "embedding-3" and "dimensions" not in merged:
+        dim = int(settings.qa_pgvector_dimensions)
+        merged["dimensions"] = dim
+        logger.info(
+            "Embedding extra_params: Zhipu embedding-3 on bigmodel.cn with no dimensions in env; "
+            "defaulting dimensions=%s from qa_pgvector_dimensions",
+            dim,
+        )
+    return merged
 
 
 def _build_provider_config(
@@ -74,7 +115,7 @@ def _normalize_provider_error(exc: ProviderRequestError) -> str:
     if exc.code == "READ_TIMEOUT":
         return (
             f"{exc.provider} 读取模型响应超时（上游在配置的超时时间内未传完数据）。"
-            f"可增大环境变量中的 llm_timeout 或 pdf_translation_llm_timeout（全文翻译）。原始：{exc.detail}"
+            f"可增大环境变量中的 llm_timeout。原始：{exc.detail}"
         )
     if exc.code == "NETWORK_ERROR":
         return f"{exc.provider} 网络连接失败，请检查服务地址、代理或外网访问状态。原始错误：{exc.detail}"
@@ -163,13 +204,18 @@ def embed_texts(
     extra_params: dict[str, Any] | None = None,
     embedding_batch_size_from_db: int | None = None,
 ) -> list[list[float]]:
-    provider_raw = provider or settings.embedding_provider
+    provider_raw = _coerce_openai_alias_for_third_party_base(provider or settings.embedding_provider, api_base)
     provider_name = normalize_provider_name(provider_raw)
     if not api_base or not api_key or not model:
         raise RuntimeError("Embedding 配置不完整")
     if not inputs:
         return []
 
+    resolved_extra = _resolve_embedding_extra_params(
+        api_base=api_base,
+        model=model,
+        explicit_extra=extra_params,
+    )
     config = _build_provider_config(
         provider=provider_name,
         api_base=api_base,
@@ -180,7 +226,7 @@ def embed_texts(
         extra_headers=extra_headers or _load_json_dict(settings.embedding_extra_headers_json),
         organization=organization or settings.embedding_organization or None,
         project=project or settings.embedding_project or None,
-        extra_params=extra_params or _load_json_dict(settings.embedding_extra_params_json),
+        extra_params=resolved_extra,
     )
     adapter = get_provider_adapter(config.provider)
     if not adapter.capabilities.supports_embeddings:
@@ -190,6 +236,8 @@ def embed_texts(
         embedding_provider_raw=provider_raw,
         db_batch_size=embedding_batch_size_from_db,
     )
+    if "bigmodel.cn" in (api_base or "").lower():
+        effective_batch = min(effective_batch, 64)
     logger.info(
         "Embedding batching: effective_batch_size=%s provider_raw=%s provider_normalized=%s "
         "db_batch_size=%s env_embed_batch_size=%s",
@@ -260,7 +308,8 @@ def chat_completion(
     project: str | None = None,
     extra_params: dict[str, Any] | None = None,
 ) -> str:
-    provider_name = normalize_provider_name(provider or settings.llm_provider)
+    raw_p = _coerce_openai_alias_for_third_party_base(provider or settings.llm_provider, api_base)
+    provider_name = normalize_provider_name(raw_p)
     if not api_base or not api_key or not model:
         raise RuntimeError("LLM 配置不完整")
 

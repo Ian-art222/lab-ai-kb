@@ -1,88 +1,160 @@
 <template>
   <AdminLayout>
-    <div class="pdf-reader">
+    <div
+      ref="readerShellRef"
+      class="reader-shell"
+      :class="{ 'is-split-dragging': splitDragging, 'is-col-split-dragging': colSplitDragging }"
+    >
       <div class="topbar">
         <el-button @click="router.back()">返回</el-button>
         <div class="title">{{ docInfo?.doc?.title || `PDF #${currentFileId}` }}</div>
-        <el-switch v-model="dualPane" active-text="双栏" inactive-text="单栏" />
-        <el-switch v-model="linkedScroll" active-text="联动滚动" inactive-text="解耦滚动" />
-        <el-button :loading="translating" @click="triggerTranslate">全文翻译</el-button>
-        <el-button @click="downloadOriginal">下载原文</el-button>
-        <el-button @click="downloadBundle">下载原文+译文</el-button>
+        <div class="topbar-actions">
+          <el-button @click="toggleReaderFullscreen">
+            {{ isReaderFullscreen ? '退出全屏' : '全屏阅读' }}
+          </el-button>
+          <el-button type="primary" plain @click="downloadOriginal">下载原文</el-button>
+        </div>
       </div>
 
-      <div class="body" :class="{ single: !dualPane }">
-        <PdfCanvasViewer
-          ref="pdfViewerRef"
-          :file-id="currentFileId"
-          @scroll="onLeftScroll"
+      <div ref="bodyRef" class="body">
+        <div class="pdf-main">
+          <PdfCanvasViewer ref="pdfViewerRef" :file-id="currentFileId" />
+        </div>
+
+        <div
+          ref="bodyColDividerRef"
+          class="body-col-divider"
+          title="拖拽调整侧栏宽度"
+          @pointerdown="onColSplitPointerDown"
+          @pointermove="onColSplitPointerMove"
+          @pointerup="onColSplitPointerUp"
+          @pointercancel="onColSplitPointerUp"
         />
 
-        <section v-if="dualPane" ref="rightPaneRef" class="pane right" @scroll="onRightScroll">
-          <div class="translate-status">
-            <el-tag v-if="translationState === 'idle'">未翻译</el-tag>
-            <el-tag v-else-if="translationState === 'pending'">排队中</el-tag>
-            <el-tag v-else-if="translationState === 'running'">翻译中 {{ translationProgress }}%</el-tag>
-            <el-tag v-else-if="translationState === 'completed'" type="success">已完成</el-tag>
-            <el-tag v-else-if="translationState === 'empty'" type="info">暂无译文</el-tag>
-            <el-tag v-else-if="translationState === 'failed'" type="danger">翻译失败</el-tag>
-            <span class="translate-debug">{{ translationDebugMessage }}</span>
-          </div>
+        <aside class="reader-right-rail" :style="{ width: `${sidebarWidthPx}px`, flexShrink: 0 }">
+          <div ref="sidebarStackRef" class="sidebar-stack">
+            <div v-if="!notesWorkspaceOpen" class="rstrip" role="button" tabindex="0" @click="notesWorkspaceOpen = true">
+              <span class="rstrip-label">笔记工作区</span>
+              <el-icon class="rstrip-icon"><ArrowDown /></el-icon>
+            </div>
 
-          <div v-if="translationErrorMessage" class="translate-error">{{ translationErrorMessage }}</div>
-          <div v-if="translationContentReadError" class="translate-error content-read-hint">
-            {{ translationContentReadError }}
-          </div>
-          <div
-            v-if="!translationErrorMessage && !translationContentReadError && translationItems.length === 0"
-            class="translate-empty"
-          >
-            暂无译文内容
-          </div>
-          <div
-            v-for="item in translationItems"
-            :key="item.chunk_id"
-            class="tr-item"
-            @click="jumpToPage(item.page_number)"
-          >
-            <div class="meta">p.{{ item.page_number || '-' }} · chunk {{ item.chunk_id }}</div>
-            <div class="text">{{ item.translated }}</div>
-          </div>
-        </section>
+            <div
+              v-else
+              class="rpanel rpanel-notes"
+              :class="{ 'rpanel--fill': !aiAssistantOpen }"
+              :style="notesFlexStyle"
+            >
+              <div class="rpanel-head">
+                <span class="rpanel-title">笔记工作区</span>
+                <el-button link type="primary" class="rpanel-toggle" @click.stop="notesWorkspaceOpen = false">
+                  <el-icon><ArrowUp /></el-icon>
+                  收起
+                </el-button>
+              </div>
+              <!-- 列表与内嵌编辑器分列：编辑器固定在笔记区底部（AI 分隔条上方），不放在列表滚动层内，避免被误认为浮层 -->
+              <div class="rpanel-notes-shell">
+                <div class="notes-lists-scroll">
+                  <div class="notes-section">
+                    <div class="notes-section-head">
+                      <span class="notes-section-title">我的笔记</span>
+                      <el-button size="small" @click.stop="openMyNoteCreate">新增</el-button>
+                    </div>
+                    <div v-for="a in myAnnotations" :key="a.id" class="note note-row" @click="openMyNoteEdit(a)">
+                      <div class="note-preview">{{ notePreviewTitle(a) }}</div>
+                      <el-button link type="danger" @click.stop="removeNote(a.id)">删除</el-button>
+                    </div>
+                  </div>
 
-        <aside class="sidebar">
-          <h4>我的笔记</h4>
-          <el-button size="small" @click="addNote">新增</el-button>
-          <div v-for="a in myAnnotations" :key="a.id" class="note">
-            <div>{{ a.annotation_json?.text }}</div>
-            <el-button link type="danger" @click="removeNote(a.id)">删除</el-button>
+                  <div class="notes-section">
+                    <div class="notes-section-title">实验室笔记</div>
+                    <p v-if="labPublicAnnotations.length === 0" class="lab-notes-empty">暂无实验室公开笔记</p>
+                    <div
+                      v-for="row in labPublicAnnotations"
+                      :key="row.id"
+                      class="note readonly lab-note-row"
+                      @click="openLabNoteReadonly(row)"
+                    >
+                      <div class="lab-note-preview">{{ notePreviewTitle(row) }}</div>
+                      <div class="lab-note-author">{{ labAuthorLabel(row) }}</div>
+                    </div>
+                  </div>
+
+                  <div class="notes-section notes-section--attachments">
+                    <div class="notes-section-title">附件</div>
+                    <input
+                      ref="attachmentInputRef"
+                      type="file"
+                      class="reader-hidden-file-input"
+                      @change="onAttachmentFileSelected"
+                    />
+                    <el-button size="small" :loading="attachmentUploading" @click.stop="openAttachmentPicker">
+                      上传附件
+                    </el-button>
+                    <p class="attachments-hint">文件会先上传到与本文献相同的文件夹，再关联到本页。</p>
+                    <div v-for="att in attachments" :key="att.id" class="note">{{ att.title || `file#${att.file_id}` }}</div>
+                  </div>
+                </div>
+
+                <div v-if="noteEditorOpen" class="notes-editor-embed">
+                  <PdfNoteEditorPanel
+                    :key="`${noteEditorMode}-${noteEditorNote?.id ?? 'new'}`"
+                    :file-id="currentFileId"
+                    :mode="noteEditorMode"
+                    :note="noteEditorNote"
+                    :get-pdf-selection="getPdfSelectionText"
+                    @close="closeNoteEditor"
+                    @saved="handleNoteEditorSaved"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div
+              v-if="notesWorkspaceOpen && aiAssistantOpen"
+              ref="splitDividerRef"
+              class="rdivider"
+              title="拖拽调整笔记区与 AI 区高度"
+              @pointerdown="onSplitPointerDown"
+              @pointermove="onSplitPointerMove"
+              @pointerup="onSplitPointerUp"
+              @pointercancel="onSplitPointerUp"
+            />
+
+            <div v-if="!aiAssistantOpen" class="rstrip" role="button" tabindex="0" @click="aiAssistantOpen = true">
+              <span class="rstrip-label">AI 助手</span>
+              <el-icon class="rstrip-icon"><ArrowDown /></el-icon>
+            </div>
+
+            <div v-else class="rpanel rpanel-ai" :class="{ 'rpanel--fill': !notesWorkspaceOpen }" :style="aiFlexStyle">
+              <div class="rpanel-head">
+                <span class="rpanel-title">AI 助手</span>
+                <el-button link type="primary" class="rpanel-toggle" @click.stop="aiAssistantOpen = false">
+                  <el-icon><ArrowUp /></el-icon>
+                  收起
+                </el-button>
+              </div>
+              <div class="rpanel-body rpanel-body--qa">
+                <p class="qa-hint">
+                  与「知识库问答」共用后端：请在<strong>管理后台 · 系统设置</strong>中配置聊天模型并开启问答；也可在部署环境变量中设置（示例：
+                  <code>LLM_PROVIDER=deepseek</code>、<code>LLM_API_BASE=https://api.deepseek.com</code>、<code>LLM_MODEL=deepseek-chat</code>）。本文献须为<strong>已索引</strong>，且 Embedding 配置正确，否则会失败。
+                </p>
+                <p v-if="pdfIndexStatus && pdfIndexStatus !== 'indexed'" class="qa-warn">
+                  当前文献索引状态：<strong>{{ pdfIndexStatus }}</strong>，请先在该文件的文件中心里完成索引后再提问。
+                </p>
+                <el-input v-model="qaQuestion" type="textarea" :rows="3" placeholder="在当前文献中提问" />
+                <el-button size="small" :loading="qaLoading" @click="askQa">提问</el-button>
+                <div v-if="qaAnswer" class="qa-answer">{{ qaAnswer }}</div>
+                <div
+                  v-for="ref in qaRefs"
+                  :key="`${ref.chunk_id}-${ref.page_number}`"
+                  class="qa-ref"
+                  @click="jumpToPage(ref.page_number)"
+                >
+                  p.{{ ref.page_number || '-' }} {{ ref.snippet }}
+                </div>
+              </div>
+            </div>
           </div>
-
-          <h4>实验室笔记</h4>
-          <el-select v-model="selectedPublicUser" placeholder="选择同事" @change="loadPublicAnnotations">
-            <el-option v-for="uid in publicUserIds" :key="uid" :label="`用户 ${uid}`" :value="uid" />
-          </el-select>
-          <div v-for="a in publicAnnotations" :key="a.id" class="note readonly">{{ a.annotation_json?.text }}</div>
-
-          <h4>附件</h4>
-          <div v-for="att in attachments" :key="att.id" class="note">{{ att.title || `file#${att.file_id}` }}</div>
-
-          <h4>AI 助手</h4>
-          <el-input v-model="qaQuestion" type="textarea" :rows="3" placeholder="在当前文献中提问" />
-          <el-button size="small" :loading="qaLoading" @click="askQa">提问</el-button>
-          <div v-if="qaAnswer" class="qa-answer">{{ qaAnswer }}</div>
-          <div
-            v-for="ref in qaRefs"
-            :key="`${ref.chunk_id}-${ref.page_number}`"
-            class="qa-ref"
-            @click="jumpToPage(ref.page_number)"
-          >
-            p.{{ ref.page_number || '-' }} {{ ref.snippet }}
-          </div>
-
-          <h4>划词翻译</h4>
-          <el-button size="small" @click="translateSelection">翻译当前选中文本</el-button>
-          <div class="qa-answer">{{ selectionTranslation }}</div>
         </aside>
       </div>
     </div>
@@ -90,63 +162,271 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import AdminLayout from '../layouts/AdminLayout.vue'
 import PdfCanvasViewer from '../components/pdf/PdfCanvasViewer.vue'
-import { usePdfTranslation } from '@/composables/usePdfTranslation'
+import PdfNoteEditorPanel from '../components/pdf/PdfNoteEditorPanel.vue'
+import { notePreviewTitle } from '../components/pdf/pdfNoteUtils'
+import { uploadFileApi } from '../api/files'
 import {
   addAttachmentApi,
   askPdfQaApi,
-  createAnnotationApi,
-  downloadPdfBundleApi,
   deleteAnnotationApi,
-  getAnnotationsByUserApi,
+  downloadPdfOriginalApi,
   getMyAnnotationsApi,
   getPdfDocumentApi,
   listAttachmentsApi,
-  listPublicAnnotationUsersApi,
-  selectionTranslateApi,
-  triggerPdfTranslateApi,
+  listLabPublicAnnotationsApi,
 } from '../api/pdfDocuments'
 
 const route = useRoute()
 const router = useRouter()
 const currentFileId = computed(() => Number(route.params.fileId))
 
-const dualPane = ref(true)
-const linkedScroll = ref(true)
+/** 与列表/详情一致：来自 pdf-documents 接口的 file_record.index_status */
+const pdfIndexStatus = computed(() => {
+  const d = docInfo.value
+  if (!d) return ''
+  return (d.doc?.index_status ?? d.file?.index_status ?? '') as string
+})
+
+const readerShellRef = ref<HTMLElement | null>(null)
+const bodyRef = ref<HTMLElement | null>(null)
+const bodyColDividerRef = ref<HTMLElement | null>(null)
+/** 右侧总栏宽度（px），与 PDF 区间可左右拖拽调整 */
+const sidebarWidthPx = ref(340)
+const colSplitDragging = ref(false)
+let colDragStartX = 0
+let colDragStartW = 0
+
+const COL_DIVIDER_W = 8
+const SIDEBAR_MIN_W = 280
+const PDF_MAIN_MIN_W = 380
+const SIDEBAR_MAX_RATIO = 0.5
+
+function colSidebarClampRange() {
+  const body = bodyRef.value
+  if (!body) {
+    return { min: SIDEBAR_MIN_W, max: 480 }
+  }
+  const total = body.getBoundingClientRect().width
+  const maxByPdf = total - PDF_MAIN_MIN_W - COL_DIVIDER_W
+  const maxByRatio = Math.floor(total * SIDEBAR_MAX_RATIO)
+  let max = Math.min(maxByPdf, maxByRatio)
+  if (max < SIDEBAR_MIN_W) {
+    /* 极窄：允许侧栏略小于理想下限，避免 max < min；PDF 区可能触发横向滚动 */
+    max = Math.max(220, total - 260 - COL_DIVIDER_W)
+  }
+  max = Math.max(max, 220)
+  const min = Math.min(SIDEBAR_MIN_W, max)
+  return { min, max }
+}
+
+function onColSplitPointerDown(e: PointerEvent) {
+  e.preventDefault()
+  const bar = bodyColDividerRef.value
+  if (!bar) return
+  colSplitDragging.value = true
+  colDragStartX = e.clientX
+  colDragStartW = sidebarWidthPx.value
+  bar.setPointerCapture(e.pointerId)
+}
+
+function onColSplitPointerMove(e: PointerEvent) {
+  if (!colSplitDragging.value) return
+  const { min, max } = colSidebarClampRange()
+  const dx = e.clientX - colDragStartX
+  sidebarWidthPx.value = Math.min(max, Math.max(min, colDragStartW + dx))
+}
+
+function onColSplitPointerUp(e: PointerEvent) {
+  if (!colSplitDragging.value) return
+  colSplitDragging.value = false
+  try {
+    bodyColDividerRef.value?.releasePointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+}
+
+const isReaderFullscreen = ref(false)
+
 const pdfViewerRef = ref<{
   scrollToPage: (n?: number | null) => void
   getLeftScrollElement: () => HTMLElement | null
+  setCssScale?: (n: number) => void
 } | null>(null)
-const rightPaneRef = ref<HTMLElement | null>(null)
-
 const docInfo = ref<any>(null)
-const translating = ref(false)
-
-const {
-  translationState,
-  translationProgress,
-  translationItems,
-  translationErrorMessage,
-  translationContentReadError,
-  translationDebugMessage,
-  refreshTranslation,
-} = usePdfTranslation(currentFileId)
 
 const myAnnotations = ref<any[]>([])
-const publicUserIds = ref<number[]>([])
-const selectedPublicUser = ref<number | null>(null)
-const publicAnnotations = ref<any[]>([])
+/** 本文献下实验室可见笔记（聚合，含 username） */
+const labPublicAnnotations = ref<any[]>([])
 const attachments = ref<any[]>([])
+const attachmentInputRef = ref<HTMLInputElement | null>(null)
+const attachmentUploading = ref(false)
 
 const qaQuestion = ref('')
 const qaLoading = ref(false)
 const qaAnswer = ref('')
 const qaRefs = ref<any[]>([])
-const selectionTranslation = ref('')
+
+const sidebarStackRef = ref<HTMLElement | null>(null)
+const splitDividerRef = ref<HTMLElement | null>(null)
+const notesWorkspaceOpen = ref(true)
+const aiAssistantOpen = ref(true)
+/** 两区均展开时，笔记区所占高度比例（剩余为 AI 区） */
+const splitRatio = ref(0.52)
+const splitDragging = ref(false)
+let splitDragStartY = 0
+let splitDragStartRatio = 0
+let splitDragShellH = 400
+
+const splitGrowNotes = computed(() => Math.max(22, Math.round(splitRatio.value * 100)))
+const splitGrowAi = computed(() => Math.max(22, 100 - splitGrowNotes.value))
+
+const notesFlexStyle = computed(() => {
+  if (!notesWorkspaceOpen.value) return {}
+  if (!aiAssistantOpen.value) {
+    return { flex: '1 1 auto', minHeight: '0' }
+  }
+  return { flex: `${splitGrowNotes.value} 1 0px`, minHeight: '120px' }
+})
+
+const aiFlexStyle = computed(() => {
+  if (!aiAssistantOpen.value) return {}
+  if (!notesWorkspaceOpen.value) {
+    return { flex: '1 1 auto', minHeight: '0' }
+  }
+  return { flex: `${splitGrowAi.value} 1 0px`, minHeight: '100px' }
+})
+
+function onSplitPointerDown(e: PointerEvent) {
+  if (!notesWorkspaceOpen.value || !aiAssistantOpen.value) return
+  e.preventDefault()
+  const bar = splitDividerRef.value
+  if (!bar) return
+  splitDragging.value = true
+  splitDragStartY = e.clientY
+  splitDragStartRatio = splitRatio.value
+  const shell = sidebarStackRef.value
+  splitDragShellH = shell ? Math.max(160, shell.getBoundingClientRect().height - 8) : 400
+  bar.setPointerCapture(e.pointerId)
+}
+
+function onSplitPointerMove(e: PointerEvent) {
+  if (!splitDragging.value) return
+  const dy = e.clientY - splitDragStartY
+  const next = splitDragStartRatio - dy / splitDragShellH
+  splitRatio.value = Math.min(0.78, Math.max(0.22, next))
+}
+
+function onSplitPointerUp(e: PointerEvent) {
+  if (!splitDragging.value) return
+  splitDragging.value = false
+  try {
+    splitDividerRef.value?.releasePointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+}
+
+type NoteDialogPayload = {
+  id: number
+  is_public?: boolean
+  annotation_json?: Record<string, unknown> | null
+  username?: string
+}
+
+const noteEditorOpen = ref(false)
+const noteEditorMode = ref<'create' | 'edit' | 'readonly'>('create')
+const noteEditorNote = ref<NoteDialogPayload | null>(null)
+
+function getPdfSelectionText() {
+  return window.getSelection()?.toString() ?? ''
+}
+
+function closeNoteEditor() {
+  noteEditorOpen.value = false
+  noteEditorNote.value = null
+}
+
+async function handleNoteEditorSaved() {
+  await onNoteSaved()
+  closeNoteEditor()
+}
+
+function openMyNoteCreate() {
+  noteEditorMode.value = 'create'
+  noteEditorNote.value = null
+  noteEditorOpen.value = true
+}
+
+function openMyNoteEdit(a: { id: number; is_public?: boolean; annotation_json?: unknown }) {
+  noteEditorMode.value = 'edit'
+  noteEditorNote.value = {
+    id: a.id,
+    is_public: a.is_public,
+    annotation_json: (a.annotation_json as Record<string, unknown> | null) ?? null,
+  }
+  noteEditorOpen.value = true
+}
+
+function labAuthorLabel(row: { username?: string | null; user_id?: number }) {
+  const name = row.username != null ? String(row.username).trim() : ''
+  if (name) return name
+  if (row.user_id != null && Number.isFinite(Number(row.user_id))) return `用户 ${row.user_id}`
+  return '未知作者'
+}
+
+function openLabNoteReadonly(row: {
+  id: number
+  user_id?: number
+  username?: string | null
+  annotation_json?: unknown
+  is_public?: boolean
+}) {
+  noteEditorMode.value = 'readonly'
+  noteEditorNote.value = {
+    id: row.id,
+    is_public: row.is_public ?? true,
+    annotation_json: (row.annotation_json as Record<string, unknown> | null) ?? null,
+    username: labAuthorLabel(row),
+  }
+  noteEditorOpen.value = true
+}
+
+async function onNoteSaved() {
+  const fid = currentFileId.value
+  if (!Number.isFinite(fid) || fid <= 0) return
+  try {
+    myAnnotations.value = await getMyAnnotationsApi(fid)
+    await loadLabPublicAnnotations(fid)
+  } catch {
+    /* 与 loadReaderMeta 侧栏策略一致：刷新失败不阻塞 */
+  }
+}
+
+function syncFullscreenFlag() {
+  isReaderFullscreen.value = document.fullscreenElement === readerShellRef.value
+  requestAnimationFrame(() => clampSidebarWidthToBody())
+}
+
+async function toggleReaderFullscreen() {
+  const el = readerShellRef.value
+  if (!el) return
+  try {
+    if (!document.fullscreenElement) {
+      await el.requestFullscreen()
+    } else {
+      await document.exitFullscreen()
+    }
+  } catch {
+    ElMessage.warning('无法进入全屏，请检查浏览器权限')
+  }
+}
 
 function normalizeErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) return error.message
@@ -154,60 +434,54 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-function onLeftScroll(ev: Event) {
-  if (!linkedScroll.value || !rightPaneRef.value) return
-  const left = ev.currentTarget as HTMLElement
-  const ratio = left.scrollTop / Math.max(1, left.scrollHeight - left.clientHeight)
-  rightPaneRef.value.scrollTop = ratio * Math.max(0, rightPaneRef.value.scrollHeight - rightPaneRef.value.clientHeight)
-}
-
-function onRightScroll() {
-  if (!linkedScroll.value || !rightPaneRef.value) return
-  const left = pdfViewerRef.value?.getLeftScrollElement?.()
-  if (!left) return
-  const ratio = rightPaneRef.value.scrollTop / Math.max(1, rightPaneRef.value.scrollHeight - rightPaneRef.value.clientHeight)
-  left.scrollTop = ratio * Math.max(0, left.scrollHeight - left.clientHeight)
-}
-
 function jumpToPage(pageNumber?: number | null) {
   pdfViewerRef.value?.scrollToPage(pageNumber)
 }
 
-async function triggerTranslate() {
-  try {
-    translating.value = true
-    await triggerPdfTranslateApi(currentFileId.value)
-    await refreshTranslation(currentFileId.value)
-    ElMessage.success('已触发翻译任务')
-  } catch (e) {
-    ElMessage.error(normalizeErrorMessage(e, '翻译失败'))
-  } finally {
-    translating.value = false
-  }
-}
-
 function downloadOriginal() {
-  void downloadPdfBundleApi(currentFileId.value, false)
-}
-
-function downloadBundle() {
-  void downloadPdfBundleApi(currentFileId.value, true)
-}
-
-async function addNote() {
-  const text = window.getSelection()?.toString().trim() || `note-${Date.now()}`
-  await createAnnotationApi(currentFileId.value, { annotation_json: { text }, is_public: false })
-  myAnnotations.value = await getMyAnnotationsApi(currentFileId.value)
+  void downloadPdfOriginalApi(currentFileId.value)
 }
 
 async function removeNote(id: number) {
-  await deleteAnnotationApi(currentFileId.value, id)
-  myAnnotations.value = await getMyAnnotationsApi(currentFileId.value)
+  const fid = currentFileId.value
+  await deleteAnnotationApi(fid, id)
+  myAnnotations.value = await getMyAnnotationsApi(fid)
+  await loadLabPublicAnnotations(fid)
 }
 
-async function loadPublicAnnotations() {
-  if (!selectedPublicUser.value) return
-  publicAnnotations.value = await getAnnotationsByUserApi(currentFileId.value, selectedPublicUser.value)
+async function loadLabPublicAnnotations(fileId: number) {
+  if (!Number.isFinite(fileId) || fileId <= 0) return
+  try {
+    labPublicAnnotations.value = await listLabPublicAnnotationsApi(fileId)
+  } catch {
+    labPublicAnnotations.value = []
+  }
+}
+
+function openAttachmentPicker() {
+  attachmentInputRef.value?.click()
+}
+
+async function onAttachmentFileSelected(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const folderId = docInfo.value?.file?.folder_id
+  attachmentUploading.value = true
+  try {
+    const uploaded = await uploadFileApi(file, folderId ?? null)
+    const newId = typeof uploaded?.id === 'number' ? uploaded.id : Number(uploaded?.id)
+    if (!Number.isFinite(newId)) throw new Error('上传返回无效')
+    await addAttachmentApi(currentFileId.value, newId, file.name)
+    attachments.value = await listAttachmentsApi(currentFileId.value)
+    ElMessage.success('附件已添加')
+  } catch (e) {
+    ElMessage.error(normalizeErrorMessage(e, '上传或关联附件失败'))
+  } finally {
+    attachmentUploading.value = false
+  }
 }
 
 async function askQa() {
@@ -215,18 +489,16 @@ async function askQa() {
   qaLoading.value = true
   try {
     const res = await askPdfQaApi(currentFileId.value, qaQuestion.value)
-    qaAnswer.value = res.answer
-    qaRefs.value = res.references || []
+    qaAnswer.value = (res?.answer ?? '') as string
+    qaRefs.value = (res?.references ?? []) as any[]
+    if (!qaAnswer.value.trim() && (!qaRefs.value || qaRefs.value.length === 0)) {
+      ElMessage.warning('未返回答案或引用，请确认文献已索引且后台已开启问答并配置 LLM。')
+    }
+  } catch (e) {
+    ElMessage.error(normalizeErrorMessage(e, '文献问答失败'))
   } finally {
     qaLoading.value = false
   }
-}
-
-async function translateSelection() {
-  const text = window.getSelection()?.toString().trim()
-  if (!text) return
-  const res = await selectionTranslateApi(currentFileId.value, text)
-  selectionTranslation.value = res.translated
 }
 
 async function loadReaderMeta(fileId: number) {
@@ -239,8 +511,8 @@ async function loadReaderMeta(fileId: number) {
 
   try {
     myAnnotations.value = await getMyAnnotationsApi(fileId)
-    publicUserIds.value = (await listPublicAnnotationUsersApi(fileId)).user_ids || []
     attachments.value = await listAttachmentsApi(fileId)
+    await loadLabPublicAnnotations(fileId)
   } catch {
     /* 侧栏失败不阻塞阅读 */
   }
@@ -265,90 +537,328 @@ watch(
   { immediate: true },
 )
 
-watch(dualPane, (v) => {
-  if (v && Number.isFinite(currentFileId.value) && currentFileId.value > 0) {
-    void refreshTranslation(currentFileId.value)
-  }
+function clampSidebarWidthToBody() {
+  const { min, max } = colSidebarClampRange()
+  sidebarWidthPx.value = Math.min(max, Math.max(min, sidebarWidthPx.value))
+}
+
+onMounted(() => {
+  document.addEventListener('fullscreenchange', syncFullscreenFlag)
+  window.addEventListener('resize', clampSidebarWidthToBody)
+  requestAnimationFrame(() => clampSidebarWidthToBody())
+})
+onUnmounted(() => {
+  document.removeEventListener('fullscreenchange', syncFullscreenFlag)
+  window.removeEventListener('resize', clampSidebarWidthToBody)
 })
 </script>
 
 <style scoped>
-.pdf-reader {
+.reader-shell {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  min-height: 0;
+  max-height: calc(100vh - 72px);
+  box-sizing: border-box;
 }
+
+.reader-shell:fullscreen {
+  max-height: none;
+  height: 100%;
+  padding: 12px;
+  background: #f5f5f5;
+}
+
 .topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-.title {
-  flex: 1;
-  font-weight: 600;
-}
-.body {
-  display: grid;
-  grid-template-columns: 1fr 1fr 320px;
-  gap: 8px;
-  height: calc(100vh - 180px);
-}
-.body.single {
-  grid-template-columns: 1fr 320px;
-}
-.pane {
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  overflow: auto;
-  padding: 8px;
-  background: #fff;
-}
-.sidebar {
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  overflow: auto;
-  padding: 8px;
-}
-.translate-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  gap: 12px;
+  flex-shrink: 0;
   margin-bottom: 8px;
 }
-.translate-debug {
-  font-size: 12px;
-  color: #777;
+
+.title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.translate-error {
-  padding: 12px;
-  color: #c00;
-  font-size: 13px;
-  white-space: pre-wrap;
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
-.content-read-hint {
-  color: #a60;
-  margin-top: 4px;
+
+.body {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
 }
-.translate-empty {
-  padding: 12px;
-  color: #666;
-  font-size: 13px;
+
+.body-col-divider {
+  flex: 0 0 8px;
+  margin: 0 4px;
+  align-self: stretch;
+  border-radius: 4px;
+  background: var(--el-border-color);
+  cursor: col-resize;
+  touch-action: none;
 }
-.tr-item {
-  border-bottom: 1px solid #eee;
-  padding: 8px 0;
+
+.body-col-divider:hover {
+  background: var(--el-color-primary-light-7);
+}
+
+.reader-shell:fullscreen .body {
+  flex: 1;
+  min-height: 0;
+}
+
+.pdf-main {
+  flex: 1 1 auto;
+  min-width: 380px;
+  min-height: 0;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  /* 主列占满剩余宽度，阅读区在列内通过 PdfCanvasViewer 居中对齐画布 */
+}
+
+.pdf-main :deep(.pdf-canvas-viewer) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.reader-right-rail {
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  overflow: hidden;
+  padding: 10px;
+  background: #fff;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.reader-right-rail .sidebar-stack {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rstrip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
   cursor: pointer;
+  user-select: none;
+  border: 1px solid var(--el-border-color-lighter);
 }
-.meta {
+
+.rstrip:last-child {
+  margin-bottom: 0;
+}
+
+.rstrip-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.rstrip-icon {
+  color: var(--el-text-color-secondary);
+}
+
+.rpanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rpanel--fill {
+  flex: 1 1 auto !important;
+  min-height: 0;
+}
+
+.rpanel-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.rpanel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.rpanel-toggle {
+  flex-shrink: 0;
+}
+
+.rpanel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.rpanel-notes-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.notes-lists-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
+  padding-bottom: 4px;
+}
+
+.notes-editor-embed {
+  flex-shrink: 0;
+  max-height: min(48vh, 440px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-light);
+}
+
+.notes-section {
+  margin-bottom: 14px;
+}
+
+.notes-section:last-child {
+  margin-bottom: 0;
+}
+
+.notes-section-title {
+  display: block;
   font-size: 12px;
-  color: #666;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--el-text-color-regular);
 }
+
+.notes-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.notes-section-head .notes-section-title {
+  margin-bottom: 0;
+}
+
+.rdivider {
+  flex: 0 0 8px;
+  margin: 4px 0;
+  border-radius: 4px;
+  background: var(--el-border-color);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.rdivider:hover {
+  background: var(--el-color-primary-light-7);
+}
+
+.reader-shell.is-split-dragging {
+  cursor: row-resize;
+  user-select: none;
+}
+
+.reader-shell.is-col-split-dragging {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.lab-notes-empty {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.4;
+}
+
+.lab-note-row {
+  cursor: pointer;
+  display: block;
+  padding: 8px;
+}
+
+.lab-note-preview {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--el-text-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.lab-note-author {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+
 .note {
   font-size: 12px;
   margin: 6px 0;
   padding: 6px;
   background: #f7f7f7;
   border-radius: 6px;
+}
+.note-row {
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.note-preview {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 .readonly {
   opacity: 0.7;
@@ -363,5 +873,37 @@ watch(dualPane, (v) => {
   color: #1f66cc;
   cursor: pointer;
   margin-top: 4px;
+}
+
+.reader-hidden-file-input {
+  display: none;
+}
+
+.attachments-hint {
+  margin: 6px 0 8px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.4;
+}
+
+.qa-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.45;
+}
+
+.qa-hint code {
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--el-fill-color-light);
+}
+
+.qa-warn {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--el-color-warning-dark-2);
+  line-height: 1.4;
 }
 </style>

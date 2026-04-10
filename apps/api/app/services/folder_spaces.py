@@ -11,6 +11,8 @@ from app.models.user import User
 HOME_NAME = "home"
 PUBLIC_ROOT_NAME = "公共文件夹"
 PRIVATE_ROOT_NAME = "个人文件夹"
+# 顶层「个人文件夹」入口：与公共树根区分，供前端展示私人空间标签（权限仍按目录 id 判定）
+PRIVATE_ROOT_SCOPE = "private_root"
 
 
 def get_home_root(db: Session) -> Folder:
@@ -73,7 +75,7 @@ def ensure_space_roots(db: Session) -> tuple[Folder, Folder, Folder]:
         prv = Folder(
             name=PRIVATE_ROOT_NAME,
             parent_id=home.id,
-            scope="public",
+            scope=PRIVATE_ROOT_SCOPE,
             owner_user_id=None,
             created_at=datetime.utcnow(),
         )
@@ -82,6 +84,15 @@ def ensure_space_roots(db: Session) -> tuple[Folder, Folder, Folder]:
     if changed:
         db.commit()
         db.refresh(pub)
+        db.refresh(prv)
+
+    if (
+        prv is not None
+        and prv.name == PRIVATE_ROOT_NAME
+        and (prv.scope or "") == "public"
+    ):
+        prv.scope = PRIVATE_ROOT_SCOPE
+        db.commit()
         db.refresh(prv)
 
     loose = (

@@ -6,9 +6,6 @@
           :current-title="currentDirectoryTitle"
           :space-label="spaceLabel"
           :space-kind="spaceKind"
-          :breadcrumbs="breadcrumbs"
-          @go-root="goRoot"
-          @go-folder="goToFolder"
         >
           <template #toolbar>
             <input
@@ -88,6 +85,19 @@
           当前账号无下载权限；如需下载请联系管理员开启「允许下载」。
         </div>
 
+        <div class="files-drive-breadcrumb-row">
+          <el-breadcrumb separator="/">
+            <el-breadcrumb-item>
+              <el-link type="primary" :underline="false" @click="goRoot">全部文件</el-link>
+            </el-breadcrumb-item>
+            <el-breadcrumb-item v-for="crumb in breadcrumbs" :key="crumb.id">
+              <el-link type="primary" :underline="false" @click="goToFolder(crumb.id)">
+                {{ crumb.name }}
+              </el-link>
+            </el-breadcrumb-item>
+          </el-breadcrumb>
+        </div>
+
         <FolderCardNavigator
           :folders="navigatorFolders"
           :loading="loading"
@@ -149,12 +159,19 @@
                 {{ row.kind === 'folder' ? row.created_at : row.upload_time }}
               </template>
             </el-table-column>
-            <el-table-column label="索引" width="120">
+            <el-table-column label="索引" width="140">
               <template #default="{ row }">
                 <template v-if="row.kind === 'file'">
-                  <el-tag :type="getIndexStatusTagType(row.index_status, row.index_warning)">
-                    {{ getIndexStatusLabel(row.index_status, row.index_warning) }}
-                  </el-tag>
+                  <el-tooltip
+                    :disabled="!row.index_error"
+                    :content="row.index_error || ''"
+                    placement="top"
+                    :max-width="380"
+                  >
+                    <el-tag :type="getIndexStatusTagType(row.index_status, row.index_warning)">
+                      {{ getIndexStatusLabel(row.index_status, row.index_warning) }}
+                    </el-tag>
+                  </el-tooltip>
                 </template>
                 <span v-else>—</span>
               </template>
@@ -240,7 +257,6 @@
         <template v-else-if="ctxMenu.row?.kind === 'file'">
           <button type="button" @click="ctxOpenFile">打开 / 详情</button>
           <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxOpenReader">打开阅读器</button>
-          <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxTranslatePdf">全文翻译</button>
           <button type="button" v-if="ctxMenu.row?.file_type === 'pdf'" @click="ctxExportBib">导出 .bib</button>
           <button
             type="button"
@@ -373,7 +389,7 @@
                 v-if="!authStore.isMember"
                 type="success"
                 :loading="indexingFileId === fileMeta!.id"
-                :disabled="!fileMeta || fileMeta.index_status === 'indexing'"
+                :disabled="!fileMeta || indexingFileId === fileMeta!.id"
                 @click="handleIngestFile(fileMeta!.id, true)"
               >
                 {{ fileMeta?.index_status === 'indexed' ? '重新索引' : '建立索引' }}
@@ -383,9 +399,6 @@
               </el-button>
               <el-button v-if="fileMeta?.file_type === 'pdf'" type="primary" plain @click="openPdfReader(fileMeta!.id)">
                 打开阅读器
-              </el-button>
-              <el-button v-if="fileMeta?.file_type === 'pdf'" plain @click="translatePdf(fileMeta!.id)">
-                全文翻译
               </el-button>
               <el-button v-if="fileMeta?.file_type === 'pdf'" plain @click="exportPdfBib(fileMeta!.id)">
                 导出 .bib
@@ -440,7 +453,7 @@ import {
 } from '../api/files'
 import { getFileIndexStatusApi, ingestFileApi } from '../api/qa'
 import { useAuthStore } from '../stores/auth'
-import { exportBibApi, triggerPdfTranslateApi } from '../api/pdfDocuments'
+import { exportBibApi } from '../api/pdfDocuments'
 import { formatAdminPrivateFolderDisplayName } from '../utils/folderDisplay'
 
 type DriveRow =
@@ -993,12 +1006,6 @@ function ctxOpenReader() {
   if (row?.kind === 'file') openPdfReader(row.id)
 }
 
-function ctxTranslatePdf() {
-  const row = ctxMenu.value.row
-  closeCtxMenu()
-  if (row?.kind === 'file') void translatePdf(row.id)
-}
-
 function ctxExportBib() {
   const row = ctxMenu.value.row
   closeCtxMenu()
@@ -1012,12 +1019,30 @@ const moveDialogTitle = computed(() => {
   return '移动到目录'
 })
 
+/** 与后端 files.index_status 对齐；勿把中间态误标为「待处理」 */
+const INDEX_IN_PROGRESS = new Set([
+  'pending',
+  'indexing',
+  'parsing',
+  'chunking',
+  'embedding',
+  'reindexing',
+])
+
 const getIndexStatusLabel = (status?: string, warning?: string | null) => {
-  if (status === 'indexing') return '索引中'
-  if (status === 'indexed' && warning) return '已索引(有提示)'
-  if (status === 'indexed') return '已索引'
-  if (status === 'failed') return '失败'
-  return '待处理'
+  const s = status || ''
+  if (s === 'indexed' && warning) return '已索引(有提示)'
+  if (s === 'indexed') return '已索引'
+  if (s === 'partial_failed') return '已索引(部分)'
+  if (s === 'failed') return '索引失败'
+  if (s === 'pending') return '排队中'
+  if (s === 'indexing') return '索引中'
+  if (s === 'parsing') return '解析文本'
+  if (s === 'chunking') return '分块中'
+  if (s === 'embedding') return '向量嵌入'
+  if (s === 'reindexing') return '重建索引'
+  if (INDEX_IN_PROGRESS.has(s)) return '处理中'
+  return s ? `未知(${s})` : '待处理'
 }
 
 const normalizeIndexError = (message?: string | null) => {
@@ -1054,10 +1079,11 @@ async function runWithConcurrency<T>(
 }
 
 const pollIndexStatus = async (fileId: number) => {
-  for (let i = 0; i < 30; i += 1) {
+  const maxRounds = 180
+  for (let i = 0; i < maxRounds; i += 1) {
     await sleep(1000)
     const latest = await getFileIndexStatusApi(fileId)
-    if (latest.index_status !== 'indexing') {
+    if (!INDEX_IN_PROGRESS.has(latest.index_status)) {
       return latest
     }
   }
@@ -1068,12 +1094,13 @@ const showIndexResultMessage = (result: {
   index_status: string
   index_warning?: string | null
   index_error?: string | null
+  skip_reason?: string | null
 }) => {
   if (result.index_status === 'indexed' && result.index_warning) {
     ElMessage.warning(result.index_warning)
     return
   }
-  if (result.index_status === 'indexed') {
+  if (result.index_status === 'indexed' || result.index_status === 'partial_failed') {
     ElMessage.success('文件索引成功')
     return
   }
@@ -1081,8 +1108,12 @@ const showIndexResultMessage = (result: {
     ElMessage.error(normalizeIndexError(result.index_error) || '文件索引失败')
     return
   }
-  if (result.index_status === 'indexing') {
-    ElMessage.info('该文件正在索引中，请稍后刷新状态')
+  if (result.skip_reason === 'ingest_already_running_in_worker') {
+    ElMessage.info('该文件已有索引任务在执行，请稍后刷新列表查看进度')
+    return
+  }
+  if (INDEX_IN_PROGRESS.has(result.index_status)) {
+    ElMessage.info('索引任务进行中，将自动刷新状态')
   }
 }
 
@@ -1098,10 +1129,11 @@ const watchIndexStatusInBackground = async (fileId: number) => {
 }
 
 const getIndexStatusTagType = (status?: string, warning?: string | null) => {
-  if (status === 'indexing') return 'info'
-  if (status === 'indexed' && warning) return 'warning'
-  if (status === 'indexed') return 'success'
-  if (status === 'failed') return 'danger'
+  const s = status || ''
+  if (s === 'failed') return 'danger'
+  if (s === 'indexed' && warning) return 'warning'
+  if (s === 'indexed' || s === 'partial_failed') return 'success'
+  if (INDEX_IN_PROGRESS.has(s)) return 'info'
   return 'warning'
 }
 
@@ -1367,11 +1399,14 @@ const handleIngestFile = async (fileId: number, refreshMeta = false) => {
     if (accepted.queued) {
       ElMessage.success('已开始索引，正在后台处理')
       void watchIndexStatusInBackground(fileId)
-    } else if (accepted.index_status === 'indexing') {
-      showIndexResultMessage(accepted)
-      void watchIndexStatusInBackground(fileId)
     } else {
       showIndexResultMessage(accepted)
+      if (
+        accepted.skip_reason !== 'ingest_already_running_in_worker' &&
+        INDEX_IN_PROGRESS.has(accepted.index_status)
+      ) {
+        void watchIndexStatusInBackground(fileId)
+      }
     }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '索引失败')
@@ -1486,15 +1521,6 @@ const goToChatForFile = (fileId: number) => {
 }
 const openPdfReader = (fileId: number) => {
   router.push({ name: 'pdf-reader', params: { fileId: String(fileId) } })
-}
-
-const translatePdf = async (fileId: number) => {
-  try {
-    await triggerPdfTranslateApi(fileId)
-    ElMessage.success('已触发 PDF 全文翻译')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '触发翻译失败')
-  }
 }
 
 const exportPdfBib = async (fileId: number) => {
@@ -1777,6 +1803,14 @@ const openFileMeta = async (fileId: number) => {
   padding: 8px 12px;
   border-radius: var(--ds-radius-md, 12px);
   background: var(--ds-warning-bg, #fff8e1);
+}
+
+.files-drive-breadcrumb-row {
+  margin-bottom: 12px;
+}
+
+.files-drive-breadcrumb-row :deep(.el-breadcrumb__inner) {
+  font-weight: 500;
 }
 .files-hidden-input {
   display: none;

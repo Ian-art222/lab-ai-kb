@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -14,13 +13,12 @@ from app.core.permissions import user_may_access_file_record
 from app.db.session import get_db
 from app.models.file_record import FileRecord
 from app.models.pdf_literature import DocumentAttachment, PdfAnnotation
-from app.models.system_setting import SystemSetting
 from app.models.user import User
-from app.services.model_service import chat_completion
 from app.services.pdf_annotation_service import (
     create_annotation,
     delete_annotation,
     list_my_annotations,
+    list_public_annotations_with_authors,
     list_public_by_user,
     list_public_users,
     update_annotation,
@@ -35,21 +33,10 @@ from app.services.pdf_export_service import (
     ris_response,
 )
 from app.services.pdf_reader_qa_service import ask_in_pdf
-from app.services.pdf_translation_service import get_latest_task, request_translation
 
 UPLOAD_DIR = Path(settings.upload_dir)
 
 router = APIRouter(prefix="/api/pdf-documents", tags=["pdf-documents"])
-
-
-class TranslateRequest(BaseModel):
-    target_language: str = "zh-CN"
-    source_language: str | None = None
-
-
-class SelectionTranslateRequest(BaseModel):
-    text: str
-    target_language: str = "zh-CN"
 
 
 class PdfQaRequest(BaseModel):
@@ -107,10 +94,10 @@ def get_document(file_id: int, db: Session = Depends(get_db), current_user: User
             "index_status": file_record.index_status,
             "index_progress": doc.index_progress,
             "index_error": file_record.index_error,
-            "translated_available": doc.translated_available,
         },
         "file": {
             "id": file_record.id,
+            "folder_id": file_record.folder_id,
             "file_name": file_record.file_name,
             "file_type": file_record.file_type,
             "mime_type": file_record.mime_type,
@@ -120,76 +107,15 @@ def get_document(file_id: int, db: Session = Depends(get_db), current_user: User
     }
 
 
-@router.post("/{file_id}/translate")
-def trigger_translate(
-    file_id: int,
-    payload: TranslateRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    _, doc = _ensure_pdf_file(db, current_user, file_id)
-    task = request_translation(
-        db,
-        doc=doc,
-        target_language=payload.target_language,
-        source_language=payload.source_language,
-        requested_by=current_user.id,
-        background_tasks=background_tasks,
-    )
-    return {"task_id": task.id, "status": task.status, "progress": task.progress, "target_language": task.target_language}
-
-
-@router.get("/{file_id}/translation-status")
-def translation_status(
-    file_id: int,
-    target_language: str = "zh-CN",
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    _, doc = _ensure_pdf_file(db, current_user, file_id)
-    task = get_latest_task(db, doc_id=doc.id, target_language=target_language)
-    if not task:
-        return {"status": "not_started", "progress": 0}
-    return {"task_id": task.id, "status": task.status, "progress": task.progress, "error_message": task.error_message}
-
-
-@router.get("/{file_id}/translation-content")
-def translation_content(
-    file_id: int,
-    target_language: str = "zh-CN",
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    _, doc = _ensure_pdf_file(db, current_user, file_id)
-    task = get_latest_task(db, doc_id=doc.id, target_language=target_language)
-    if not task:
-        raise HTTPException(status_code=404, detail="翻译任务不存在")
-    return {
-        "status": task.status,
-        "progress": task.progress,
-        "content": task.translated_structured_json,
-        "error_message": task.error_message,
-    }
-
-
 @router.get("/{file_id}/download")
 def document_download(
     file_id: int,
     include_original: bool = True,
-    include_translation: bool = False,
-    target_language: str = "zh-CN",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    file_record, doc = _ensure_pdf_file(db, current_user, file_id)
-    task = get_latest_task(db, doc_id=doc.id, target_language=target_language)
-    return build_download_response(
-        file_record=file_record,
-        translation_task=task,
-        include_original=include_original,
-        include_translation=include_translation,
-    )
+    file_record, _ = _ensure_pdf_file(db, current_user, file_id)
+    return build_download_response(file_record=file_record, include_original=include_original)
 
 
 @router.get("/{file_id}/content")
@@ -202,11 +128,13 @@ def document_content(
     file_path = _get_file_storage_path(file_record)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="服务器上未找到该文件")
+    # 禁止手写 Content-Disposition：非 ASCII 文件名会令 Starlette 用 latin-1 编码头而抛 UnicodeEncodeError。
+    # 使用 FileResponse 内置 filename + content_disposition_type，由 Starlette 生成 filename*=utf-8''…
     return FileResponse(
         path=file_path,
         filename=file_record.file_name,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{file_record.file_name}"'},
+        content_disposition_type="inline",
     )
 
 
@@ -298,35 +226,33 @@ def annotations_public_users(file_id: int, db: Session = Depends(get_db), curren
     return {"user_ids": list_public_users(db, doc=doc)}
 
 
+@router.get("/{file_id}/annotations/lab-public")
+def annotations_lab_public(file_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """本文献下所有「实验室可见」批注/笔记（含作者），供阅读器「他人笔记」聚合列表。"""
+    _, doc = _ensure_pdf_file(db, current_user, file_id)
+    rows = list_public_annotations_with_authors(db, doc=doc)
+    out = []
+    for ann, username in rows:
+        out.append(
+            {
+                "id": ann.id,
+                "user_id": ann.user_id,
+                "username": username,
+                "annotation_json": ann.annotation_json,
+                "version": ann.version,
+                "is_public": ann.is_public,
+                "readonly": True,
+                "is_author": ann.user_id == current_user.id,
+            }
+        )
+    return out
+
+
 @router.get("/{file_id}/annotations/by-user/{user_id}")
 def annotations_by_user(file_id: int, user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _, doc = _ensure_pdf_file(db, current_user, file_id)
     rows = list_public_by_user(db, doc=doc, user_id=user_id)
     return [{"id": r.id, "annotation_json": r.annotation_json, "version": r.version, "readonly": True} for r in rows]
-
-
-@router.post("/{file_id}/selection-translate")
-def selection_translate(
-    file_id: int,
-    payload: SelectionTranslateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    _, _ = _ensure_pdf_file(db, current_user, file_id)
-    settings = db.query(SystemSetting).filter(SystemSetting.id == 1).first()
-    if not settings:
-        raise HTTPException(status_code=400, detail="系统设置不存在")
-    translated = chat_completion(
-        provider=settings.llm_provider,
-        api_base=settings.llm_api_base,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        messages=[
-            {"role": "system", "content": "你是术语准确的学术翻译助手，仅输出译文。"},
-            {"role": "user", "content": f"翻译为 {payload.target_language}:\n\n{payload.text}"},
-        ],
-    )
-    return {"translated": translated, "target_language": payload.target_language}
 
 
 @router.post("/{file_id}/qa")

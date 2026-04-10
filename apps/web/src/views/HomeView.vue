@@ -228,15 +228,25 @@ const dashboard = reactive<DashboardResponse>({
 })
 
 const getIndexStatusLabel = (status?: string) => {
-  if (status === 'indexed') return '已索引'
-  if (status === 'failed') return '失败'
-  return '待处理'
+  const s = status || ''
+  if (s === 'indexed') return '已索引'
+  if (s === 'partial_failed') return '已索引(部分)'
+  if (s === 'failed') return '索引失败'
+  if (s === 'pending') return '排队中'
+  if (s === 'indexing') return '索引中'
+  if (s === 'parsing') return '解析文本'
+  if (s === 'chunking') return '分块中'
+  if (s === 'embedding') return '向量嵌入'
+  if (s === 'reindexing') return '重建索引'
+  return s ? `处理中(${s})` : '待处理'
 }
 
 const getIndexStatusTagType = (status?: string) => {
-  if (status === 'indexing') return 'info'
-  if (status === 'indexed') return 'success'
-  if (status === 'failed') return 'danger'
+  const s = status || ''
+  if (s === 'failed') return 'danger'
+  if (s === 'indexed' || s === 'partial_failed') return 'success'
+  if (['indexing', 'parsing', 'chunking', 'embedding', 'reindexing', 'pending'].includes(s))
+    return 'info'
   return 'warning'
 }
 

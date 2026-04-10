@@ -78,9 +78,15 @@ function displayFolderName(f: FolderItem): string {
   })
 }
 
+function isPersonalSpaceRoot(f: FolderItem): boolean {
+  return (f.name || '').trim() === '个人文件夹'
+}
+
 function badgeFor(f: FolderItem): string {
   const sc = (f.scope || '').toLowerCase()
-  if (sc === 'admin_private') return '私人'
+  if (sc === 'admin_private') return '个人'
+  if (sc === 'private_root' || (props.variant === 'home' && isPersonalSpaceRoot(f)))
+    return '私人'
   if (sc === 'public') return '公共'
   return ''
 }
@@ -89,6 +95,7 @@ function cardSubtitle(f: FolderItem): string {
   const sc = (f.scope || '').toLowerCase()
   if (props.variant === 'home') {
     if (sc === 'admin_private') return '个人目录 · 仅本人与 root 可访问'
+    if (sc === 'private_root' || isPersonalSpaceRoot(f)) return '仅个人可用，与公共区隔离'
     if (sc === 'public') return '全员可见与协作'
     return '点击进入'
   }

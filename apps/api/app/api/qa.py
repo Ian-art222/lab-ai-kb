@@ -175,6 +175,7 @@ def ingest_file(
         file_record=file_record,
         background_tasks=background_tasks,
         reset_status=True,
+        force=payload.force_reindex,
     )
 
     db.refresh(file_record)
@@ -185,6 +186,7 @@ def ingest_file(
         "index_error": file_record.index_error,
         "index_warning": file_record.index_warning,
         "queued": bool(result.get("queued")),
+        "skip_reason": result.get("skip_reason"),
     }
 
 

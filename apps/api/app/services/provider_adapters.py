@@ -19,6 +19,10 @@ PROVIDER_ALIASES = {
     "dashscope": "openai_compatible",
     "hunyuan": "openai_compatible",
     "tencent_hunyuan": "openai_compatible",
+    # 智谱 GLM OpenAI 兼容网关（/v4/chat/completions、/v4/embeddings）
+    "zhipu": "openai_compatible",
+    "bigmodel": "openai_compatible",
+    "glm": "openai_compatible",
 }
 
 

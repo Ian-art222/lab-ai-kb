@@ -33,7 +33,7 @@ class KnowledgeChunk(Base):
     # Store embedding as Postgres float array for MVP compatibility.
     embedding: Mapped[list[float] | None] = mapped_column(sa.ARRAY(sa.Float), nullable=True)
     # pgvector column (fixed dim in DB migration; NULL when embedding dim differs).
-    embedding_vec: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    embedding_vec: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     search_vector: Mapped[TSVECTOR | None] = mapped_column(
         TSVECTOR, nullable=True,
         comment="PostgreSQL full-text search vector (simple config, populated externally).",

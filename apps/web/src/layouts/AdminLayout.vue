@@ -68,7 +68,7 @@
         <header class="topbar">
           <div>
             <div class="topbar-title">{{ systemStore.systemName }}</div>
-            <div class="topbar-subtitle">企业知识库 · 文件中心 · 智能检索问答</div>
+            <div class="topbar-subtitle">红花课题组</div>
           </div>
 
           <div class="topbar-actions">

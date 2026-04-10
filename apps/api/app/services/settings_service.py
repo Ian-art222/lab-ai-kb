@@ -11,6 +11,7 @@ from app.schemas.setting import SettingItem, SettingStatus
 
 MAX_EMBEDDING_BATCH_GLOBAL = 100
 QWEN_FAMILY_MAX_EMBED_BATCH = 10
+ZHIPU_FAMILY_MAX_EMBED_BATCH = 64
 
 
 @dataclass(slots=True)
@@ -26,10 +27,17 @@ def embedding_provider_is_qwen_family(raw: str) -> bool:
     return key in ("qwen", "dashscope")
 
 
+def embedding_provider_is_zhipu_family(raw: str) -> bool:
+    key = (raw or "").strip().lower()
+    return key in ("zhipu", "bigmodel", "glm")
+
+
 def canonical_embedding_provider(raw: str | None) -> str:
     key = (raw or "").strip().lower()
     if embedding_provider_is_qwen_family(key):
         return "qwen"
+    if embedding_provider_is_zhipu_family(key):
+        return "zhipu"
     return key
 
 
@@ -67,6 +75,9 @@ def get_effective_embedding_batch_size(
 
     if embedding_provider_is_qwen_family(embedding_provider_raw):
         base = min(base, QWEN_FAMILY_MAX_EMBED_BATCH)
+
+    if embedding_provider_is_zhipu_family(embedding_provider_raw):
+        base = min(base, ZHIPU_FAMILY_MAX_EMBED_BATCH)
 
     return max(1, base)
 

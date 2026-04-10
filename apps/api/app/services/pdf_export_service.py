@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import json
-import tempfile
-import zipfile
 from pathlib import Path
 
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from app.core.config import settings
 from app.models.file_record import FileRecord
-from app.models.pdf_literature import PdfDocument, PdfTranslationTask
+from app.models.pdf_literature import PdfDocument
 
 
 def _storage_path(file_record: FileRecord) -> Path:
@@ -62,24 +59,11 @@ def _authors_line(doc: PdfDocument) -> str:
 def build_download_response(
     *,
     file_record: FileRecord,
-    translation_task: PdfTranslationTask | None,
-    include_original: bool,
-    include_translation: bool,
+    include_original: bool = True,
 ) -> FileResponse:
+    """返回已上传的 PDF 原件（全文翻译 /  zip 打包译文已移除）。"""
     original_path = _storage_path(file_record)
-    if include_original and not include_translation:
-        return FileResponse(path=original_path, filename=file_record.file_name, media_type="application/pdf")
-
-    tmp = tempfile.NamedTemporaryFile(prefix="pdf-doc-", suffix=".zip", delete=False)
-    tmp_path = Path(tmp.name)
-    tmp.close()
-    with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if include_original and original_path.exists():
-            zf.write(original_path, arcname=file_record.file_name)
-        if include_translation and translation_task and translation_task.translated_structured_json is not None:
-            payload = translation_task.translated_structured_json
-            zf.writestr("translation.json", json.dumps(payload, ensure_ascii=False, indent=2))
-    return FileResponse(path=tmp_path, filename=f"{Path(file_record.file_name).stem}-bundle.zip", media_type="application/zip")
+    return FileResponse(path=original_path, filename=file_record.file_name, media_type="application/pdf")
 
 
 def bib_response(content: str, file_name: str) -> PlainTextResponse:

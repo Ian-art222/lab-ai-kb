@@ -17,6 +17,11 @@ from app.models.knowledge import KnowledgeChunk
 from app.models.system_setting import SystemSetting
 from app.services import chunk_pipeline
 from app.services.model_service import embed_texts
+from app.services.text_sanitize import (
+    sanitize_json_for_db,
+    sanitize_rows_spec_for_db,
+    sanitize_text_for_db,
+)
 from app.services.settings_service import (
     build_embedding_index_standard,
     get_effective_embedding_batch_size,
@@ -33,9 +38,60 @@ PIPELINE_VERSION = "v2_phase2"
 PIPELINE_VERSION_STRUCTURAL = chunk_pipeline.PIPELINE_VERSION
 
 
+def _ingest_exception_to_public_message(exc: BaseException) -> str:
+    """将写库/flush 等异常转换为用户可读摘要（避免把 SQL/psycopg 长栈暴露给前端）。"""
+    parts: list[str] = [str(exc)]
+    cause: BaseException | None = getattr(exc, "__cause__", None)
+    seen = 0
+    while cause is not None and seen < 6:
+        parts.append(str(cause))
+        cause = getattr(cause, "__cause__", None)
+        seen += 1
+    blob = " ".join(parts)
+    low = blob.lower()
+    if "nul" in low or "0x00" in low or "\x00" in blob:
+        return (
+            "索引写入数据库时检测到非法空字节（NUL），通常来自 PDF 抽取层。"
+            "系统已自动清洗；若仍失败请更换 PDF 导出版本或联系管理员。"
+        )
+    if "pendingrollback" in low or ("rolled back" in low and "session" in low):
+        return "索引事务已中断，请重新建立索引。若多次失败请联系管理员。"
+    raw = str(exc).strip()
+    if len(raw) > 480:
+        return raw[:480].rsplit(" ", 1)[0] + "…"
+    return raw
+
+
+def _sanitize_public_index_error(message: str) -> str:
+    """写入 index_error / 返回前端前弱化敏感 token（不依赖完全防漏，仅降低误泄露概率）。"""
+    s = (message or "").strip()
+    if not s:
+        return "索引失败，原因未知"
+    s = re.sub(
+        r"(?i)\b(sk-[a-z0-9]{16,}|[a-z0-9_-]{20,}\.(?:[a-z0-9_-]{10,}\.)+[a-z0-9_-]{10,})\b",
+        "[redacted]",
+        s,
+    )
+    s = re.sub(r"(?i)(api[_-]?key|authorization:\s*bearer)\s*[:=]\s*\S+", r"\1: [redacted]", s)
+    if len(s) > 2000:
+        s = s[:2000] + "…"
+    return s
+
+
 def _set_index_stage(db: Session, file_record: FileRecord, stage: str) -> None:
+    now = datetime.utcnow()
     file_record.index_status = stage
+    file_record.index_status_updated_at = now
+    if stage == "indexing":
+        file_record.index_run_started_at = now
     file_record.pipeline_version = PIPELINE_VERSION
+    db.commit()
+    db.refresh(file_record)
+
+
+def touch_index_job_progress(db: Session, file_record: FileRecord) -> None:
+    """长耗时阶段（结构切块、批量 embedding）中心跳，刷新 index_status_updated_at 避免误判僵尸。"""
+    file_record.index_status_updated_at = datetime.utcnow()
     db.commit()
     db.refresh(file_record)
 
@@ -49,16 +105,18 @@ def _extract_text(file_record: FileRecord, file_path: Path) -> str:
     file_type = (file_record.file_type or "").lower()
 
     if file_type in {"txt", "md"}:
-        return file_path.read_text(encoding="utf-8")
+        return sanitize_text_for_db(file_path.read_text(encoding="utf-8"))
     if file_type in {"csv", "tsv"}:
-        return file_path.read_text(encoding="utf-8")
+        return sanitize_text_for_db(file_path.read_text(encoding="utf-8"))
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+        pages = [
+            sanitize_text_for_db((page.extract_text() or "").strip()) for page in reader.pages
+        ]
         return "\n\n".join([page for page in pages if page])
     if file_type == "docx":
         document = Document(str(file_path))
-        paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs]
+        paragraphs = [sanitize_text_for_db(paragraph.text.strip()) for paragraph in document.paragraphs]
         return "\n".join([paragraph for paragraph in paragraphs if paragraph])
 
     raise ValueError(f"暂不支持该文件类型索引：{file_type or 'unknown'}")
@@ -148,31 +206,37 @@ def _looks_like_text_table(content: str) -> bool:
     return bool(sep_like and pipe_lines)
 
 
+def _sanitize_segment_list(segments: list[dict]) -> list[dict]:
+    return [sanitize_json_for_db(dict(s)) for s in segments]
+
+
 def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
     file_type = (file_record.file_type or "").lower()
 
     if file_type in {"txt", "md"}:
-        text = file_path.read_text(encoding="utf-8")
+        text = sanitize_text_for_db(file_path.read_text(encoding="utf-8"))
         if file_type == "md":
             md_segments = _split_markdown_sections(text)
             if md_segments:
-                return md_segments
-        return _split_paragraph_segments(text, page_number=None)
+                return _sanitize_segment_list(md_segments)
+        return _sanitize_segment_list(_split_paragraph_segments(text, page_number=None))
     if file_type in {"csv", "tsv"}:
-        text = file_path.read_text(encoding="utf-8")
+        text = sanitize_text_for_db(file_path.read_text(encoding="utf-8"))
         rows = [line.strip() for line in text.splitlines() if line.strip()]
-        return [
-            {
-                "text": row,
-                "page_number": None,
-                "section_title": "tabular_rows",
-                "block_type": "table",
-                "section_path": ["tabular_rows"],
-                "parent_section": "tabular_rows",
-                "source_type": file_type,
-            }
-            for row in rows
-        ]
+        return _sanitize_segment_list(
+            [
+                {
+                    "text": row,
+                    "page_number": None,
+                    "section_title": "tabular_rows",
+                    "block_type": "table",
+                    "section_path": ["tabular_rows"],
+                    "parent_section": "tabular_rows",
+                    "source_type": file_type,
+                }
+                for row in rows
+            ]
+        )
     if file_type == "pdf":
         reader = PdfReader(str(file_path))
         segments: list[dict] = []
@@ -193,7 +257,7 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
                 "PDF text extraction looks weak for file_id=%s; likely scanned PDF without OCR support",
                 file_record.id,
             )
-        return segments
+        return _sanitize_segment_list(segments)
     if file_type == "docx":
         document = Document(str(file_path))
         segments: list[dict] = []
@@ -217,7 +281,7 @@ def _extract_segments(file_record: FileRecord, file_path: Path) -> list[dict]:
                     "source_type": "docx",
                 }
             )
-        return segments
+        return _sanitize_segment_list(segments)
 
     raise ValueError(f"暂不支持该文件类型索引：{file_type or 'unknown'}")
 
@@ -372,6 +436,8 @@ def _mark_index_success(
     file_record.index_embedding_model = index_embedding_model
     file_record.index_embedding_dimension = index_embedding_dimension
     file_record.pipeline_version = pipeline_version or PIPELINE_VERSION
+    file_record.index_status_updated_at = indexed_at
+    file_record.index_run_started_at = None
     db.commit()
     db.refresh(file_record)
     return file_record
@@ -382,25 +448,39 @@ def _mark_index_failure(
     *,
     file_id: int,
     error_message: str,
+    error_code: str = "internal_error",
 ) -> FileRecord:
+    public_msg = _sanitize_public_index_error(error_message)
     db.rollback()
     db.query(KnowledgeChunk).filter(KnowledgeChunk.file_id == file_id).delete()
     file_record = db.query(FileRecord).filter(FileRecord.id == file_id).first()
     if file_record is None:
-        raise RuntimeError(error_message)
+        raise RuntimeError(public_msg)
+    now = datetime.utcnow()
     file_record.index_status = "failed"
     file_record.indexed_at = None
-    file_record.index_error = error_message
-    file_record.last_error = error_message
-    file_record.last_error_code = "internal_error"
+    file_record.index_error = public_msg
+    file_record.last_error = public_msg
+    file_record.last_error_code = error_code
     file_record.index_warning = None
     file_record.index_embedding_provider = None
     file_record.index_embedding_model = None
     file_record.index_embedding_dimension = None
     file_record.pipeline_version = PIPELINE_VERSION
+    file_record.index_status_updated_at = now
+    file_record.index_run_started_at = None
     db.commit()
     db.refresh(file_record)
     return file_record
+
+
+def mark_ingest_failed_safe(db: Session, *, file_id: int, error_message: str) -> FileRecord | None:
+    """后台线程兜底：任意未捕获异常时仍落库 failed，避免永久卡在中间态。"""
+    try:
+        return _mark_index_failure(db, file_id=file_id, error_message=error_message)
+    except Exception:
+        logger.exception("mark_ingest_failed_safe failed for file_id=%s", file_id)
+        return None
 
 
 def ingest_file(db: Session, file_record: FileRecord) -> FileRecord:
@@ -414,6 +494,7 @@ def ingest_file_job(
     prepare_indexing: bool,
 ) -> FileRecord:
     if prepare_indexing:
+        now0 = datetime.utcnow()
         file_record.index_status = "pending"
         file_record.index_error = None
         file_record.index_warning = None
@@ -423,6 +504,8 @@ def ingest_file_job(
         file_record.index_embedding_provider = None
         file_record.index_embedding_model = None
         file_record.index_embedding_dimension = None
+        file_record.index_run_started_at = None
+        file_record.index_status_updated_at = now0
         file_record.pipeline_version = (
             PIPELINE_VERSION_STRUCTURAL
             if app_settings.ingest_structural_chunking_enabled
@@ -431,12 +514,21 @@ def ingest_file_job(
         db.commit()
         db.refresh(file_record)
     file_path = _resolve_file_path(file_record)
+    ingest_fid = int(file_record.id)
+    ingest_chash = file_record.content_hash
 
     try:
         if not file_path.exists():
             raise FileNotFoundError("物理文件不存在，无法建立索引")
         if file_record.file_size == 0:
             raise ValueError("文件为空，无法建立索引")
+
+        _set_index_stage(db, file_record, "indexing")
+        logger.info(
+            "ingest start file_id=%s name=%s stage=indexing",
+            file_record.id,
+            (file_record.file_name or "")[:120],
+        )
 
         # 勿命名为 text：会遮蔽 sqlalchemy.text，导致后续 db.execute(text(...)) 报
         # TypeError: 'str' object is not callable
@@ -453,6 +545,7 @@ def ingest_file_job(
             rows_spec, pipe_warnings = chunk_pipeline.build_rows_spec(file_record, file_path)
             warnings.extend(pipe_warnings)
             active_pipeline = PIPELINE_VERSION_STRUCTURAL
+            touch_index_job_progress(db, file_record)
         else:
             segments = _extract_segments(file_record, file_path)
             limited_segments, truncated = _limit_segments(segments)
@@ -541,8 +634,11 @@ def ingest_file_job(
                     )
                 if segment_warning and segment_warning not in warnings:
                     warnings.append(segment_warning)
+        touch_index_job_progress(db, file_record)
         if not rows_spec:
             raise ValueError("文本内容不足以形成可用索引")
+
+        rows_spec = sanitize_rows_spec_for_db(rows_spec)
 
         for i, row in enumerate(rows_spec):
             row["chunk_index"] = i
@@ -597,6 +693,7 @@ def ingest_file_job(
             )
             if child_indices:
                 _set_index_stage(db, file_record, "embedding")
+                touch_index_job_progress(db, file_record)
                 embeddings = embed_texts(
                     provider=settings.embedding_provider,
                     api_base=settings.embedding_api_base,
@@ -605,6 +702,7 @@ def ingest_file_job(
                     inputs=[rows_spec[i]["content"] for i in child_indices],
                     embedding_batch_size_from_db=settings.embedding_batch_size,
                 )
+                touch_index_job_progress(db, file_record)
             if embeddings and embeddings[0]:
                 index_embedding_provider = settings.embedding_provider
                 index_embedding_model = settings.embedding_model
@@ -711,14 +809,19 @@ def ingest_file_job(
             pipeline_version=active_pipeline,
         )
     except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("ingest rollback after error failed file_id=%s", ingest_fid)
+        public_exc = _ingest_exception_to_public_message(exc)
         logger.exception(
-            "Ingest failed file_id=%s content_hash=%s error=%s",
-            file_record.id,
-            file_record.content_hash,
-            exc,
+            "Ingest failed file_id=%s content_hash=%s public=%s",
+            ingest_fid,
+            ingest_chash,
+            public_exc,
         )
         return _mark_index_failure(
             db,
-            file_id=file_record.id,
-            error_message=str(exc),
+            file_id=ingest_fid,
+            error_message=public_exc,
         )

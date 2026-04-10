@@ -6,6 +6,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+from app.core.config import settings as app_settings
 from app.db.session import SessionLocal
 from app.models.file_record import FileRecord
 from app.services.ingest_service import ingest_file_job
@@ -13,12 +14,18 @@ from app.services.settings_service import build_embedding_index_standard, get_or
 
 
 def classify_file(file_record: FileRecord, current_index_standard: str) -> str:
+    if file_record.index_status != "indexed":
+        return "needs_index"
+    # 与 qa_pgvector_dimensions / 当前 embedding 模型输出不一致时必须全量重嵌入（不可截断/补零复用）
+    if (
+        file_record.index_embedding_dimension is not None
+        and file_record.index_embedding_dimension != app_settings.qa_pgvector_dimensions
+    ):
+        return "needs_reindex"
     file_standard = build_embedding_index_standard(
         embedding_provider=file_record.index_embedding_provider,
         embedding_model=file_record.index_embedding_model,
     )
-    if file_record.index_status != "indexed":
-        return "needs_index"
     if not file_standard:
         return "legacy_index_missing_metadata"
     if file_standard != current_index_standard:
@@ -39,6 +46,7 @@ def print_report(files: list[FileRecord], *, current_index_standard: str) -> dic
         buckets.setdefault(classify_file(file_record, current_index_standard), []).append(file_record)
 
     print(f"Current retrieval index standard: {current_index_standard or '<not configured>'}")
+    print(f"Expected embedding dimension (QA_PGVECTOR_DIMENSIONS): {app_settings.qa_pgvector_dimensions}")
     for key in ("compatible", "needs_index", "needs_reindex", "legacy_index_missing_metadata"):
         print(f"- {key}: {len(buckets[key])}")
     print()

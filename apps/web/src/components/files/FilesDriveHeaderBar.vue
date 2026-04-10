@@ -1,16 +1,6 @@
 <template>
   <header class="drive-header-bar">
     <div class="drive-header-main">
-      <el-breadcrumb separator="/">
-        <el-breadcrumb-item>
-          <el-link type="primary" :underline="false" @click="emit('go-root')">全部文件</el-link>
-        </el-breadcrumb-item>
-        <el-breadcrumb-item v-for="crumb in breadcrumbs" :key="crumb.id">
-          <el-link type="primary" :underline="false" @click="emit('go-folder', crumb.id)">
-            {{ crumb.name }}
-          </el-link>
-        </el-breadcrumb-item>
-      </el-breadcrumb>
       <div class="drive-header-title-row">
         <h2 class="drive-dir-title">{{ currentTitle }}</h2>
         <div class="drive-header-meta">
@@ -30,18 +20,10 @@
 </template>
 
 <script setup lang="ts">
-import type { BreadcrumbItem } from '../../api/files'
-
 defineProps<{
   currentTitle: string
   spaceLabel: string
   spaceKind: string
-  breadcrumbs: BreadcrumbItem[]
-}>()
-
-const emit = defineEmits<{
-  'go-root': []
-  'go-folder': [folderId: number]
 }>()
 </script>
 

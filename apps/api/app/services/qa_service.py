@@ -1230,6 +1230,36 @@ class QAServiceError(Exception):
         self.message = message
 
 
+def _qa_model_runtime_error(stage: str, exc: BaseException) -> QAServiceError:
+    """将 RuntimeError 细分为可展示、可日志定位的 QA 错误（不吞掉原始信息）。"""
+    detail = str(exc).strip() if exc else ""
+    if len(detail) > 1200:
+        detail = detail[:1200] + "…"
+    low = detail.lower()
+    if stage == "embed" or "embedding" in low or "embed" in low[:80]:
+        code = "EMBEDDING_REQUEST_FAILED"
+        msg = detail or "Embedding 调用失败，请检查 API Key、Base URL、模型名与网络。"
+    elif "recursion" in low or isinstance(exc, RecursionError):
+        code = "QA_INTERNAL_ERROR"
+        msg = detail or "问答内部处理异常，请稍后重试或联系管理员。"
+    elif "readtimeout" in low or "超时" in detail or "timeout" in low:
+        code = "MODEL_TIMEOUT"
+        msg = detail or "模型请求超时，可稍后重试或增大 llm_timeout / embedding_timeout。"
+    elif "429" in detail or "rate_limit" in low or "限流" in detail or "quota" in low:
+        code = "MODEL_RATE_LIMITED"
+        msg = detail or "模型服务限流或配额不足。"
+    elif "401" in detail or "403" in detail or "auth" in low or "认证" in detail:
+        code = "MODEL_AUTH_FAILED"
+        msg = detail or "模型服务认证失败，请检查 API Key。"
+    elif "404" in detail or "not found" in low or "不存在" in detail:
+        code = "MODEL_NOT_FOUND"
+        msg = detail or "模型或接口路径不存在，请检查 model 名与 Base URL（如 OpenAI 兼容需 /v1）。"
+    else:
+        code = "MODEL_REQUEST_FAILED"
+        msg = detail or "模型服务请求失败，请检查当前配置与连接状态。"
+    return QAServiceError(code, msg)
+
+
 def ensure_session(
     db: Session,
     *,
@@ -1634,6 +1664,15 @@ def _semantic_retrieval_pgvector(
     top_k: int,
 ) -> list[dict]:
     if not compatible_file_ids or not query_embedding:
+        return []
+    # knowledge_chunks.embedding_vec 为固定维度（见迁移 vector(1024)，须与智谱请求 dimensions 及 qa_pgvector_dimensions 一致）；查询向量维度不一致时
+    # 不能绑定到 <=>，否则 SQLAlchemy/pgvector 抛 StatementError。此时走上层 app-layer 余弦。
+    if len(query_embedding) != app_settings.qa_pgvector_dimensions:
+        logger.info(
+            "pgvector query skipped: embedding_dim=%s expected=%s (use ARRAY embedding fallback)",
+            len(query_embedding),
+            app_settings.qa_pgvector_dimensions,
+        )
         return []
     try:
         distance_expr = KnowledgeChunk.embedding_vec.cosine_distance(query_embedding)
@@ -2290,7 +2329,7 @@ def ask_question(
             embedding_batch_size_from_db=settings.embedding_batch_size,
         )
     except RuntimeError as exc:
-        raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
+        raise _qa_model_runtime_error("embed", exc) from exc
     if not query_embeddings:
         raise QAServiceError("EMBEDDING_DATA_UNAVAILABLE", "查询向量为空，无法执行检索")
 
@@ -2321,7 +2360,7 @@ def ask_question(
         try:
             answer = _qa_chat_completion(settings, system=system_msg, user=user_prompt)
         except RuntimeError as exc:
-            raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
+            raise _qa_model_runtime_error("chat", exc) from exc
         answer = MODEL_NON_KB_PREFIX + answer
         refs_payload = {"answer_source": "model_general", "references": []}
         retrieval_meta = _build_retrieval_meta(
@@ -3073,7 +3112,7 @@ def ask_question(
             "retrieval_meta": retrieval_meta,
         }
     except RuntimeError as exc:
-        raise QAServiceError("MODEL_REQUEST_FAILED", "模型服务请求失败，请检查当前配置与连接状态") from exc
+        raise _qa_model_runtime_error("completion", exc) from exc
 
 
 def persist_qa_citations(

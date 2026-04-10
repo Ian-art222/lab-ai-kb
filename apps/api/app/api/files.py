@@ -815,17 +815,20 @@ async def upload_file(
     save_path = UPLOAD_DIR / storage_name
     save_path.write_bytes(content)
 
+    up_now = datetime.utcnow()
     new_file = FileRecord(
         file_name=file_name,
         file_type=file_ext,
         uploader=current_user.username,
-        upload_time=datetime.utcnow(),
+        upload_time=up_now,
         folder_id=folder_id,
         storage_path=storage_name,
         file_size=len(content),
         mime_type=file.content_type,
         content_hash=content_hash,
         index_status="pending",
+        index_status_updated_at=up_now,
+        index_run_started_at=None,
     )
 
     db.add(new_file)
@@ -1082,17 +1085,20 @@ def copy_file_record(
     dest_path = UPLOAD_DIR / storage_name
     shutil.copy2(src_path, dest_path)
 
+    cp_now = datetime.utcnow()
     new_file = FileRecord(
         file_name=file_record.file_name,
         file_type=file_record.file_type,
         uploader=current_user.username,
-        upload_time=datetime.utcnow(),
+        upload_time=cp_now,
         folder_id=dest_folder_id,
         storage_path=storage_name,
         file_size=dest_path.stat().st_size,
         mime_type=file_record.mime_type,
         content_hash=file_record.content_hash,
         index_status="pending",
+        index_status_updated_at=cp_now,
+        index_run_started_at=None,
     )
     db.add(new_file)
     db.commit()

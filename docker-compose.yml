@@ -27,6 +27,7 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: lab-ai-kb-api
     restart: unless-stopped
+    # 需存在：首次启动请执行 `cp apps/api/.env.example apps/api/.env`（.gitignore 忽略 .env）
     env_file:
       - ./apps/api/.env
     environment:

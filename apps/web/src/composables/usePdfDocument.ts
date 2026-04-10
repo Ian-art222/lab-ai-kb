@@ -2,6 +2,7 @@ import {
   nextTick,
   onBeforeUnmount,
   ref,
+  shallowRef,
   watch,
   type Ref,
 } from 'vue'
@@ -33,6 +34,13 @@ export function usePdfDocument(fileId: Ref<number>) {
   const pdfState = ref<PdfRenderState>('idle')
   const pdfErrorMessage = ref('')
   const pageCount = ref(0)
+  /** 与 canvas 一致的 CSS 缩放（不含 DPR）；变更会触发整本重绘 */
+  const cssScale = ref(1.25)
+  const pdfDocumentRef = shallowRef<{
+    numPages: number
+    getPage: (n: number) => Promise<any>
+    destroy: () => Promise<void>
+  } | null>(null)
 
   let pdfDoc: { numPages: number; getPage: (n: number) => Promise<any>; destroy: () => Promise<void> } | null =
     null
@@ -96,14 +104,19 @@ export function usePdfDocument(fileId: Ref<number>) {
       }
     }
     pdfDoc = null
+    pdfDocumentRef.value = null
     canvasMap.clear()
   }
 
-  function viewportScaleForPage(page: { getViewport: (o: { scale: number }) => { width: number; height: number } }) {
+  function viewportScaleForPage(page: {
+    getViewport: (o: { scale: number; rotation?: number }) => { width: number; height: number }
+    rotate?: number
+  }) {
     const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1
-    const base = 1.25
-    const vp = page.getViewport({ scale: base * dpr })
-    return { vp, dpr, cssScale: base }
+    const base = cssScale.value
+    const rotation = typeof page.rotate === 'number' ? page.rotate : 0
+    const vp = page.getViewport({ scale: base * dpr, rotation })
+    return { vp, dpr, cssScale: base, rotation }
   }
 
   /**
@@ -254,6 +267,7 @@ export function usePdfDocument(fileId: Ref<number>) {
       pdfLoadingTask = loadTask
       const doc = await loadTask.promise
       pdfDoc = doc
+      pdfDocumentRef.value = doc
 
       if (signal.aborted || seq !== requestSeq) return
 
@@ -295,11 +309,21 @@ export function usePdfDocument(fileId: Ref<number>) {
     { immediate: true },
   )
 
+  watch(cssScale, () => {
+    if (pdfState.value === 'loaded' && pdfDoc && pageCount.value > 0) {
+      void renderAllPages(requestSeq)
+    }
+  })
+
   onBeforeUnmount(() => {
     fetchAbort?.abort()
     fetchAbort = null
     void cleanupPdfResources()
   })
+
+  function getCanvasForPage(pageNo: number): HTMLCanvasElement | null {
+    return canvasMap.get(pageNo) ?? null
+  }
 
   return {
     pdfState,
@@ -308,5 +332,14 @@ export function usePdfDocument(fileId: Ref<number>) {
     bindCanvas,
     cleanupPdfResources,
     pdfWorkerUrl,
+    pdfDocumentRef,
+    cssScale,
+    setCssScale: (v: number) => {
+      const n = Number(v)
+      if (Number.isFinite(n) && n >= 0.5 && n <= 3) {
+        cssScale.value = n
+      }
+    },
+    getCanvasForPage,
   }
 }

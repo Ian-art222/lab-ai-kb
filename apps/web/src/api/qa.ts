@@ -150,6 +150,8 @@ export interface IndexStatusResponse {
   index_error?: string | null
   index_warning?: string | null
   queued?: boolean
+  /** 未入队原因，例如 ingest_already_running_in_worker */
+  skip_reason?: string | null
 }
 
 export interface QAMessageItem {

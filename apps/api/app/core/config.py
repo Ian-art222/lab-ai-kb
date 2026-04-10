@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_api_version: str = ""
     llm_timeout: float = 60.0
-    # 全文翻译逐 chunk 调模型，单 chunk 响应可能超过普通对话超时
-    pdf_translation_llm_timeout: float = 300.0
     llm_extra_headers_json: str = ""
     llm_organization: str = ""
     llm_project: str = ""
@@ -103,10 +101,21 @@ class Settings(BaseSettings):
 
     # pgvector semantic search (dimension must match migration + DB column; mismatch → in-memory fallback)
     qa_pgvector_semantic_enabled: bool = True
-    qa_pgvector_dimensions: int = 1536
+    # 须与 knowledge_chunks.embedding_vec 及当前 embedding 请求实际返回长度一致。
+    # 智谱 Embedding-3 不传 dimensions 时 API 默认 2048 维，但 pgvector HNSW 索引维度上限为 2000，无法在列上建 HNSW。
+    # 生产推荐在 EMBEDDING_EXTRA_PARAMS_JSON 中传 {"dimensions": 1024}，使输出与 vector(1024) + HNSW 一致。
+    qa_pgvector_dimensions: int = 1024
 
     # Governance / diagnostics
     qa_failure_cases_dir: str = "evals/fixtures/failure_cases"
+
+    # 索引僵尸任务自动回收（依赖 files.index_status_updated_at / index_run_started_at）
+    index_stale_reclaim_enabled: bool = True
+    # pending 且从未进入 indexing（run_started_at IS NULL）超过此时长 → 视为调度丢失
+    index_stale_pending_minutes: int = 90
+    # indexing/parsing/chunking/embedding/reindexing 超过此时长无状态推进 → 视为中断/卡死
+    index_stale_processing_minutes: int = 360
+    index_stale_scan_interval_seconds: int = 300
 
     # Chunking / parsing (text-only)
     ingest_chunk_size: int = 1000

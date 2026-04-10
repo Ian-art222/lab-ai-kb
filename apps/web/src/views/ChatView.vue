@@ -887,7 +887,13 @@ const getAskErrorMessage = (error: unknown) => {
     if (error.code === 'EMBEDDING_DIMENSION_MISMATCH') return '当前索引数据维度不一致，请重新索引相关文件后再试。'
     if (error.code === 'NO_RELIABLE_EVIDENCE')
       return '知识库中未找到足够可用的依据；在严格模式下无法回答，可尝试放宽范围或关闭严格模式。'
-    if (error.code === 'MODEL_REQUEST_FAILED') return '模型服务请求失败，请检查 LLM / Embedding 配置与服务状态。'
+    if (error.code === 'MODEL_REQUEST_FAILED') return error.message || '模型服务请求失败，请检查 LLM / Embedding 配置与服务状态。'
+    if (error.code === 'EMBEDDING_REQUEST_FAILED') return error.message || 'Embedding 调用失败，请检查 Embedding 的 API Key、Base URL 与模型名。'
+    if (error.code === 'MODEL_TIMEOUT') return error.message || '模型请求超时，请稍后重试或联系管理员调大超时时间。'
+    if (error.code === 'MODEL_RATE_LIMITED') return error.message || '模型服务限流或配额不足，请稍后重试。'
+    if (error.code === 'MODEL_AUTH_FAILED') return error.message || '模型服务认证失败，请检查 API Key。'
+    if (error.code === 'MODEL_NOT_FOUND') return error.message || '模型或接口不存在，请检查模型名与 Base URL。'
+    if (error.code === 'QA_INTERNAL_ERROR') return error.message || '问答内部处理异常，请稍后重试。'
     return error.message
   }
   return normalizeAskError(error instanceof Error ? error.message : '提问失败')

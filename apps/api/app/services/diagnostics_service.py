@@ -203,13 +203,17 @@ def retry_or_reindex_file(db: Session, *, file_id: int, force_reindex: bool) -> 
     if not file_record:
         raise HTTPException(status_code=404, detail="文件不存在")
 
-    if file_record.index_status in _ACTIVE_INDEXING_STATUSES:
+    # 与 schedule_ingest 一致：中间态可能是僵尸（进程崩溃），force 时必须允许重新跑
+    if file_record.index_status in _ACTIVE_INDEXING_STATUSES and not force_reindex:
         return file_record
 
     if file_record.index_status == "indexed" and not force_reindex:
         return file_record
 
+    now = datetime.utcnow()
     file_record.index_status = "reindexing" if force_reindex else "pending"
+    file_record.index_run_started_at = None
+    file_record.index_status_updated_at = now
     file_record.last_error = None
     file_record.last_error_code = None
     if file_record.index_status != "indexed":

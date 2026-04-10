@@ -44,6 +44,19 @@ class RawBlock:
     source_type: str = "text"
 
 
+def sanitize_raw_block(b: RawBlock) -> RawBlock:
+    from app.services.text_sanitize import sanitize_text_for_db
+
+    return RawBlock(
+        text=sanitize_text_for_db(b.text),
+        block_type=b.block_type,
+        heading_path=[sanitize_text_for_db(h) for h in (b.heading_path or [])],
+        section_title=sanitize_text_for_db(b.section_title) if b.section_title else None,
+        page_number=b.page_number,
+        source_type=b.source_type,
+    )
+
+
 def _heading_path_str(path: list[str]) -> str:
     return " > ".join(p for p in path if p) if path else ""
 
@@ -259,7 +272,10 @@ def _looks_like_text_table(content: str) -> bool:
 
 def normalize_pdf_page_text(raw: str) -> str:
     """PDF 页级清洗：断行拼接、页码/页脚启发式剔除、空白归一。"""
-    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    from app.services.text_sanitize import sanitize_text_for_db
+
+    text = sanitize_text_for_db(raw)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"-\n(?=\w)", "", text)
     text = re.sub(r"(?<=[\u4e00-\u9fff])\n(?=[\u4e00-\u9fff])", "", text)
     lines = text.split("\n")
@@ -281,7 +297,7 @@ def normalize_pdf_page_text(raw: str) -> str:
         cleaned.append(ln.rstrip())
     text = "\n".join(cleaned)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
+    return sanitize_text_for_db(text)
 
 
 def parse_plain_blocks(text: str, *, page_number: int | None, source_type: str) -> list[RawBlock]:
@@ -475,14 +491,21 @@ def parse_csv_blocks(text: str, source_type: str) -> list[RawBlock]:
 
 
 def extract_raw_blocks(file_record: Any, file_path: Path) -> list[RawBlock]:
+    from app.services.text_sanitize import sanitize_text_for_db
+
     ft = (file_record.file_type or "").lower()
+    blocks: list[RawBlock]
     if ft == "md":
-        return parse_markdown_blocks(file_path.read_text(encoding="utf-8"))
-    if ft in {"txt"}:
-        return parse_plain_blocks(file_path.read_text(encoding="utf-8"), page_number=None, source_type=ft)
-    if ft in {"csv", "tsv"}:
-        return parse_csv_blocks(file_path.read_text(encoding="utf-8"), ft)
-    if ft == "pdf":
+        blocks = parse_markdown_blocks(sanitize_text_for_db(file_path.read_text(encoding="utf-8")))
+    elif ft in {"txt"}:
+        blocks = parse_plain_blocks(
+            sanitize_text_for_db(file_path.read_text(encoding="utf-8")),
+            page_number=None,
+            source_type=ft,
+        )
+    elif ft in {"csv", "tsv"}:
+        blocks = parse_csv_blocks(sanitize_text_for_db(file_path.read_text(encoding="utf-8")), ft)
+    elif ft == "pdf":
         from PyPDF2 import PdfReader
 
         reader = PdfReader(str(file_path))
@@ -493,10 +516,12 @@ def extract_raw_blocks(file_record: Any, file_path: Path) -> list[RawBlock]:
                 out.extend(
                     parse_plain_blocks(raw, page_number=index + 1, source_type="pdf")
                 )
-        return out
-    if ft == "docx":
-        return parse_docx_blocks(file_path)
-    raise ValueError(f"暂不支持的文件类型: {ft}")
+        blocks = out
+    elif ft == "docx":
+        blocks = parse_docx_blocks(file_path)
+    else:
+        raise ValueError(f"暂不支持的文件类型: {ft}")
+    return [sanitize_raw_block(b) for b in blocks]
 
 
 def _merge_small_blocks(blocks: list[RawBlock], max_merge_chars: int) -> list[RawBlock]:

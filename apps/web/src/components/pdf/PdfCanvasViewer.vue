@@ -1,8 +1,20 @@
 <template>
-  <section ref="leftPaneRef" class="pane left pdf-canvas-viewer" @scroll="onScroll">
+  <section ref="scrollRootRef" class="pdf-canvas-viewer">
     <div v-if="pdfState === 'loading'" class="pdf-status">PDF 正在加载…</div>
     <div v-else-if="pdfState === 'failed'" class="pdf-load-error">{{ pdfErrorMessage }}</div>
     <template v-else-if="pdfState === 'loaded'">
+      <div class="pdf-zoom-bar">
+        <span class="pdf-zoom-label">缩放</span>
+        <el-slider
+          v-model="zoomSlider"
+          :min="0.75"
+          :max="2.25"
+          :step="0.05"
+          :show-tooltip="true"
+          style="width: 160px"
+        />
+        <span class="pdf-zoom-val">{{ zoomSlider.toFixed(2) }}×</span>
+      </div>
       <div
         v-for="p in pageCount"
         :key="`page-${fileId}-${p}`"
@@ -10,7 +22,9 @@
         class="pdf-page-wrap"
       >
         <div class="pdf-page-meta">第 {{ p }} / {{ pageCount }} 页</div>
-        <canvas :ref="(el) => bindCanvas(el, p)" class="pdf-canvas" />
+        <div class="pdf-canvas-stack">
+          <canvas :ref="(el) => bindCanvas(el, p)" class="pdf-canvas" />
+        </div>
       </div>
     </template>
     <div v-else class="pdf-status">请选择文献</div>
@@ -18,73 +32,96 @@
 </template>
 
 <script setup lang="ts">
-import { ref, toRef } from 'vue'
+import { computed, ref, toRef } from 'vue'
 import { usePdfDocument } from '@/composables/usePdfDocument'
 
 const props = defineProps<{
   fileId: number
 }>()
 
-const emit = defineEmits<{
-  scroll: [Event]
-}>()
-
-const leftPaneRef = ref<HTMLElement | null>(null)
+const scrollRootRef = ref<HTMLElement | null>(null)
 const fileIdRef = toRef(props, 'fileId')
 
-const { pdfState, pdfErrorMessage, pageCount, bindCanvas } = usePdfDocument(fileIdRef)
+const {
+  pdfState,
+  pdfErrorMessage,
+  pageCount,
+  bindCanvas,
+  cssScale,
+  setCssScale,
+} = usePdfDocument(fileIdRef)
 
-function onScroll(ev: Event) {
-  emit('scroll', ev)
-}
+const zoomSlider = computed({
+  get: () => cssScale.value,
+  set: (v: number) => setCssScale(Number(v)),
+})
 
 function scrollToPage(pageNumber?: number | null) {
-  if (!pageNumber || !leftPaneRef.value) return
-  const node = leftPaneRef.value.querySelector(`[data-page="${pageNumber}"]`)
+  if (!pageNumber || !scrollRootRef.value) return
+  const node = scrollRootRef.value.querySelector(`[data-page="${pageNumber}"]`)
   if (node) node.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 defineExpose({
   scrollToPage,
-  getLeftScrollElement: () => leftPaneRef.value,
+  getLeftScrollElement: () => scrollRootRef.value,
+  setCssScale,
+  cssScale,
 })
 </script>
 
 <style scoped>
-.pdf-canvas-viewer.pane {
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  overflow: auto;
-  padding: 8px;
-  background: #fff;
-}
-.pdf-status {
-  padding: 16px;
-  color: #666;
-}
-.pdf-load-error {
-  padding: 16px;
-  color: #c00;
-  font-size: 14px;
-  line-height: 1.5;
-  white-space: pre-wrap;
+.pdf-canvas-viewer {
+  height: 100%;
+  min-height: 240px;
+  padding: 10px;
+  box-sizing: border-box;
 }
 .pdf-page-wrap {
-  margin-bottom: 12px;
-  background: #f5f5f5;
-  border-radius: 8px;
-  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 1rem;
 }
 .pdf-page-meta {
   font-size: 12px;
   color: #666;
   margin-bottom: 6px;
 }
+.pdf-canvas-stack {
+  position: relative;
+  display: inline-block;
+}
 .pdf-canvas {
   display: block;
-  max-width: 100%;
-  height: auto;
-  background: #fafafa;
-  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+.pdf-status,
+.pdf-load-error {
+  padding: 12px;
+  font-size: 14px;
+  color: #606266;
+}
+.pdf-load-error {
+  color: #c00;
+}
+.pdf-zoom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+  width: 100%;
+}
+.pdf-zoom-label {
+  font-size: 12px;
+  color: #606266;
+}
+.pdf-zoom-val {
+  font-size: 12px;
+  color: #303133;
+  min-width: 3rem;
 }
 </style>
